@@ -68,7 +68,7 @@ func build() BuildResult {
 		}
 		now := time.Now().Format(time.RFC3339)
 		log.Printf("Build os=%s, arch=%s\n", buildOs, buildArch)
-		name := "denv-" + buildOs + "-" + buildArch + suffix
+		name := "pw-" + buildOs + "-" + buildArch + suffix
 		cmd := exec.Command(
 			"go",
 			"build",
@@ -77,7 +77,7 @@ func build() BuildResult {
 			"-trimpath",
 			"-o",
 			"bin/"+name,
-			"./cmd/denv",
+			"./cmd/pw",
 		)
 		env := os.Environ()
 		cmd.Env = append(env, "CGO_ENABLED=0", "GOOS="+buildOs, "GOARCH="+buildArch)

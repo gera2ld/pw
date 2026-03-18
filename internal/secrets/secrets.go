@@ -1,4 +1,4 @@
-package env
+package secrets
 
 import (
 	"errors"
@@ -7,106 +7,79 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
-	"denv/internal/config"
-	"denv/internal/filehandler"
+	"pw/internal/config"
+	"pw/internal/filehandler"
 
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"gopkg.in/yaml.v3"
 )
 
-/*
- * Protocol:
- *
- * ```
- * id: my-key
- * ---
- * key1: value1
- * key2: value2
- * ---
- * Any other payload
- * ```
- */
-
-type DynamicEnvMetadata struct {
-	ID string `yaml:"id"`
-}
-type DynamicEnvValue struct {
-	Metadata DynamicEnvMetadata
-	Raw      string
-	Data     map[string]any
-	Payload  string
+type Secret struct {
+	Data    map[string]any
+	Payload string
 }
 
-type DynamicEnv struct {
+type SecretManager struct {
 	Config      *config.ConfigType
 	UserConfig  *config.UserConfigType
 	Filehandler *filehandler.FileHandler
 	index       *map[string]string
 }
 
-type DynamicEnvParsed struct {
+type Vars struct {
 	Local map[string]string
 	Env   map[string]string
 }
 
-func NewDynamicEnv(config *config.ConfigType, userConfig *config.UserConfigType, filehandler *filehandler.FileHandler) *DynamicEnv {
-	return &DynamicEnv{Config: config, UserConfig: userConfig, Filehandler: filehandler}
+func NewSecretManager(config *config.ConfigType, userConfig *config.UserConfigType, filehandler *filehandler.FileHandler) *SecretManager {
+	return &SecretManager{Config: config, UserConfig: userConfig, Filehandler: filehandler}
 }
 
-func (d *DynamicEnv) GetFilePath(path string) string {
+func (d *SecretManager) GetFilePath(path string) string {
 	if strings.HasPrefix(path, d.Config.DataDir+"/") {
 		return path + d.Config.EnvSuffix
 	}
 	return path
 }
 
-func (d *DynamicEnv) ParseRawValue(value string, includeMetadata bool) (*DynamicEnvValue, error) {
+func (d *SecretManager) SanitizeID(id string) string {
+	re := regexp.MustCompile(`[^\w+\-/@.]`)
+	return re.ReplaceAllString(id, "-")
+}
+
+func (d *SecretManager) ParseRawValue(value string) (*Secret, error) {
 	lines := strings.Split(value, "\n")
-	var metadata DynamicEnvMetadata
 
-	i := -1
-	if includeMetadata {
-		i = indexOf(lines, "---", 0)
-		if i < 0 {
-			return nil, errors.New("invalid YAML content: missing metadata separator")
-		}
+	i := indexOf(lines, "---", 0)
 
-		rawMetadata := make(map[string]any)
-		if err := yaml.Unmarshal([]byte(strings.Join(lines[:i], "\n")), &rawMetadata); err != nil {
-			return nil, errors.New("invalid metadata: " + err.Error())
-		}
-
-		id, ok := rawMetadata["id"].(string)
-		if !ok || id == "" {
-			return nil, errors.New("invalid metadata: missing or invalid 'id'")
-		}
-
-		metadata.ID = id
+	var yamlContent string
+	if i >= 0 {
+		yamlContent = strings.Join(lines[:i], "\n")
+	} else {
+		yamlContent = value
 	}
 
-	j := indexOf(lines, "---", i+1)
-	if j < 0 {
-		j = len(lines)
-	}
-
-	raw := strings.Join(lines[i+1:j], "\n")
 	data := make(map[string]any)
-	if err := yaml.Unmarshal([]byte(raw), &data); err != nil {
-		return nil, errors.New("invalid data: " + err.Error())
+	if err := yaml.Unmarshal([]byte(yamlContent), &data); err != nil {
+		return nil, errors.New("invalid YAML: " + err.Error())
+	}
+
+	id, ok := data["__id"].(string)
+	if !ok || id == "" {
+		return nil, errors.New("invalid: missing or invalid '__id'")
 	}
 
 	payload := ""
-	if j < len(lines) {
-		payload = strings.Join(lines[j+1:], "\n")
+	if i >= 0 && i < len(lines)-1 {
+		payload = strings.Join(lines[i+1:], "\n")
 	}
 
-	return &DynamicEnvValue{
-		Metadata: metadata,
-		Raw:      raw,
-		Data:     data,
-		Payload:  payload,
+	return &Secret{
+		Data:    data,
+		Payload: payload,
 	}, nil
 }
 
@@ -119,21 +92,19 @@ func indexOf(lines []string, target string, offset int) int {
 	return -1
 }
 
-func (d *DynamicEnv) FormatValue(value *DynamicEnvValue, includeMetadata bool) (string, error) {
+func (d *SecretManager) FormatValue(value *Secret) (string, error) {
 	if value == nil {
 		return "", errors.New("value is nil")
 	}
 
 	output := ""
-	if includeMetadata {
-		data, err := yaml.Marshal(value.Metadata)
-		if err != nil {
-			return "", errors.New("failed to marshal metadata: " + err.Error())
-		}
-		output += string(data) + "\n---\n"
-	}
 
-	output += value.Raw
+	data, err := yaml.Marshal(value.Data)
+	if err != nil {
+		return "", errors.New("failed to marshal data: " + err.Error())
+	}
+	output += string(data)
+
 	if value.Payload != "" {
 		output += "\n---\n" + value.Payload
 	}
@@ -141,7 +112,7 @@ func (d *DynamicEnv) FormatValue(value *DynamicEnvValue, includeMetadata bool) (
 	return output, nil
 }
 
-func (d *DynamicEnv) EncryptData(data string) (string, error) {
+func (d *SecretManager) EncryptData(data string) (string, error) {
 	if len(d.UserConfig.Data.Recipients) == 0 {
 		return "", errors.New("no recipient is added")
 	}
@@ -162,7 +133,7 @@ func (d *DynamicEnv) EncryptData(data string) (string, error) {
 	return string(output), nil
 }
 
-func (d *DynamicEnv) DecryptData(data string) (string, error) {
+func (d *SecretManager) DecryptData(data string) (string, error) {
 	if d.Config.Identities == "" {
 		return "", errors.New("no identities file provided")
 	}
@@ -180,16 +151,16 @@ func (d *DynamicEnv) DecryptData(data string) (string, error) {
 	return string(output), nil
 }
 
-func (d *DynamicEnv) LoadValue(encrypted string) (*DynamicEnvValue, error) {
+func (d *SecretManager) LoadValue(encrypted string) (*Secret, error) {
 	value, err := d.DecryptData(encrypted)
 	if err != nil {
 		return nil, errors.New("failed to decrypt data: " + err.Error())
 	}
-	dynamicEnvValue, err := d.ParseRawValue(value, true)
+	dynamicEnvValue, err := d.ParseRawValue(value)
 	return dynamicEnvValue, err
 }
 
-func (d *DynamicEnv) ListEnvFiles(prefix string) ([]string, error) {
+func (d *SecretManager) ListSecretFiles(prefix string) ([]string, error) {
 	files, err := d.Filehandler.ListFiles(filepath.Join(d.Config.DataDir, prefix), d.Config.DataDir)
 	if err != nil {
 		return nil, err
@@ -203,14 +174,14 @@ func (d *DynamicEnv) ListEnvFiles(prefix string) ([]string, error) {
 	return result, nil
 }
 
-func (d *DynamicEnv) ListItems(prefix string) map[string]*DynamicEnvValue {
-	envs := make(map[string]*DynamicEnvValue)
-	files, err := d.ListEnvFiles(prefix)
+func (d *SecretManager) ListItems(prefix string) map[string]*Secret {
+	secrets := make(map[string]*Secret)
+	files, err := d.ListSecretFiles(prefix)
 	if err != nil {
 		if d.Config.Debug {
 			log.Printf("Error listing files: %v\n", err)
 		}
-		return envs
+		return secrets
 	}
 
 	for _, file := range files {
@@ -232,12 +203,12 @@ func (d *DynamicEnv) ListItems(prefix string) map[string]*DynamicEnvValue {
 			continue
 		}
 		uid := strings.TrimSuffix(file, d.Config.EnvSuffix)
-		envs[uid] = dynamicEnvValue
+		secrets[uid] = dynamicEnvValue
 	}
-	return envs
+	return secrets
 }
 
-func (d *DynamicEnv) LoadIndex() *map[string]string {
+func (d *SecretManager) LoadIndex() *map[string]string {
 	if d.index != nil {
 		return d.index
 	}
@@ -253,7 +224,7 @@ func (d *DynamicEnv) LoadIndex() *map[string]string {
 	return d.index
 }
 
-func (d *DynamicEnv) SaveIndex(index *map[string]string) error {
+func (d *SecretManager) SaveIndex(index *map[string]string) error {
 	indexContent, err := yaml.Marshal(index)
 	if err != nil {
 		return err
@@ -262,16 +233,24 @@ func (d *DynamicEnv) SaveIndex(index *map[string]string) error {
 	return d.Filehandler.WriteFile(d.Config.IndexFile, string(indexContent))
 }
 
-func (d *DynamicEnv) BuildIndex() error {
-	envs := d.ListItems("")
+func (d *SecretManager) BuildIndex() error {
+	secrets := d.ListItems("")
 	index := make(map[string]string)
-	for uid, value := range envs {
-		index[uid] = value.Metadata.ID
+	idCounts := make(map[string]int)
+
+	for uid, value := range secrets {
+		baseID := value.Data["__id"].(string)
+		idCounts[baseID]++
+		if idCounts[baseID] > 1 {
+			index[uid] = fmt.Sprintf("%s (%d)", baseID, idCounts[baseID]-1)
+		} else {
+			index[uid] = baseID
+		}
 	}
 	return d.SaveIndex(&index)
 }
 
-func (d *DynamicEnv) UpdateIndex(uid string, id string, idFrom string) error {
+func (d *SecretManager) UpdateIndex(uid string, id string, idFrom string) error {
 	index := d.LoadIndex()
 	if id == "" {
 		delete(*index, uid)
@@ -281,7 +260,7 @@ func (d *DynamicEnv) UpdateIndex(uid string, id string, idFrom string) error {
 	return d.SaveIndex(d.index)
 }
 
-func (d *DynamicEnv) GetEnvUID(key string) (string, error) {
+func (d *SecretManager) GetSecretUID(key string) (string, error) {
 	index := d.LoadIndex()
 	uid := ""
 	for iUid, iId := range *index {
@@ -300,17 +279,17 @@ func (d *DynamicEnv) GetEnvUID(key string) (string, error) {
 	return uid, nil
 }
 
-func (d *DynamicEnv) GetEnvPath(uid string) string {
+func (d *SecretManager) GetSecretPath(uid string) string {
 	path := filepath.Join(d.Config.DataDir, uid+d.Config.EnvSuffix)
 	return path
 }
 
-func (d *DynamicEnv) GetEnv(key string) (*DynamicEnvValue, error) {
-	uid, err := d.GetEnvUID(key)
+func (d *SecretManager) GetSecret(key string) (*Secret, error) {
+	uid, err := d.GetSecretUID(key)
 	if err != nil {
 		return nil, err
 	}
-	path := d.GetEnvPath(uid)
+	path := d.GetSecretPath(uid)
 	data, err := d.Filehandler.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -319,20 +298,20 @@ func (d *DynamicEnv) GetEnv(key string) (*DynamicEnvValue, error) {
 	return dynamicEnvValue, err
 }
 
-func (d *DynamicEnv) SetEnv(key string, value *DynamicEnvValue) error {
+func (d *SecretManager) SetSecret(key string, value *Secret) error {
 	if value == nil {
 		return errors.New("value is nil")
 	}
 
-	keyFrom := value.Metadata.ID
-	value.Metadata.ID = key
+	keyFrom := value.Data["__id"].(string)
+	value.Data["__id"] = key
 
-	uid, err := d.GetEnvUID(keyFrom)
+	uid, err := d.GetSecretUID(keyFrom)
 	if err != nil {
 		return err
 	}
 
-	data, err := d.FormatValue(value, true)
+	data, err := d.FormatValue(value)
 	if err != nil {
 		return err
 	}
@@ -342,7 +321,7 @@ func (d *DynamicEnv) SetEnv(key string, value *DynamicEnvValue) error {
 		return err
 	}
 
-	path := d.GetEnvPath(uid)
+	path := d.GetSecretPath(uid)
 	if err := d.Filehandler.WriteFile(path, encrypted); err != nil {
 		return err
 	}
@@ -350,12 +329,12 @@ func (d *DynamicEnv) SetEnv(key string, value *DynamicEnvValue) error {
 	return d.UpdateIndex(uid, key, keyFrom)
 }
 
-func (d *DynamicEnv) DeleteEnv(key string) error {
-	uid, err := d.GetEnvUID(key)
+func (d *SecretManager) DeleteSecret(key string) error {
+	uid, err := d.GetSecretUID(key)
 	if err != nil {
 		return err
 	}
-	path := d.GetEnvPath(uid)
+	path := d.GetSecretPath(uid)
 	err = d.Filehandler.DeleteFile(path)
 	if err != nil {
 		return err
@@ -363,7 +342,7 @@ func (d *DynamicEnv) DeleteEnv(key string) error {
 	return d.UpdateIndex(uid, "", key)
 }
 
-func (d *DynamicEnv) ListEnvs() ([]string, error) {
+func (d *SecretManager) ListSecrets() ([]string, error) {
 	index := d.LoadIndex()
 	keys := make([]string, 0, len(*index))
 	for _, iId := range *index {
@@ -372,51 +351,34 @@ func (d *DynamicEnv) ListEnvs() ([]string, error) {
 	return keys, nil
 }
 
-func (d *DynamicEnv) ParseEnv(key string) (*DynamicEnvParsed, error) {
-	parsed, err := d.GetEnv(key)
+func (d *SecretManager) ParseSecret(key string) (*Vars, error) {
+	parsed, err := d.GetSecret(key)
 	if err != nil {
 		return nil, errors.New("data not found: " + key)
 	}
 
-	result := DynamicEnvParsed{Local: make(map[string]string), Env: make(map[string]string)}
+	result := Vars{Local: make(map[string]string), Env: make(map[string]string)}
 
-	if extends, ok := parsed.Data["extends"].([]any); ok {
-		for _, dep := range extends {
-			depKey, ok := dep.(string)
-			if !ok {
-				continue
-			}
-			parsedDep, err := d.ParseEnv(depKey)
-			if err != nil {
-				return nil, err
-			}
-			for k, v := range parsedDep.Local {
-				result.Local[k] = v
-			}
-			for k, v := range parsedDep.Env {
-				result.Env[k] = v
-			}
+	for k, v := range parsed.Data {
+		strVal := fmt.Sprintf("%v", v)
+		if strings.HasPrefix(k, "__") {
+			continue
+		}
+		if strings.HasPrefix(k, "_") {
+			result.Local[k] = strVal
+		} else {
+			result.Env[k] = strVal
 		}
 	}
 
-	if local, ok := parsed.Data["local"].(map[string]any); ok {
-		for k, v := range local {
-			result.Local[k] = fmt.Sprintf("%v", v)
-		}
-	}
-
-	if env, ok := parsed.Data["env"].(map[string]any); ok {
-		for k, v := range env {
-			value := fmt.Sprintf("%v", v)
-			resolved := resolveEnvVariables(value, result.Local)
-			result.Env[k] = resolved
-		}
+	for k, v := range result.Env {
+		result.Env[k] = resolveVariables(v, result.Local)
 	}
 
 	return &result, nil
 }
 
-func resolveEnvVariables(value string, local map[string]string) string {
+func resolveVariables(value string, local map[string]string) string {
 	return os.Expand(value, func(variable string) string {
 		if variable == "$" {
 			return "$"
@@ -428,24 +390,24 @@ func resolveEnvVariables(value string, local map[string]string) string {
 	})
 }
 
-func (d *DynamicEnv) GetEnvs(keys []string) map[string]string {
-	envs := make(map[string]string)
+func (d *SecretManager) GetSecrets(keys []string) map[string]string {
+	secrets := make(map[string]string)
 	for _, key := range keys {
-		parsed, err := d.ParseEnv(key)
+		parsed, err := d.ParseSecret(key)
 		if err != nil {
 			if d.Config.Debug {
-				log.Printf("Error parsing env %s: %v\n", key, err)
+				log.Printf("Error parsing secret %s: %v\n", key, err)
 			}
 			continue
 		}
 		for k, v := range parsed.Env {
-			envs[k] = v
+			secrets[k] = v
 		}
 	}
-	return envs
+	return secrets
 }
 
-func (d *DynamicEnv) VerifyIdentities() error {
+func (d *SecretManager) VerifyIdentities() error {
 	cmd := exec.Command("age-keygen", "-y", d.Config.Identities)
 	output, err := cmd.Output()
 	if err != nil {
@@ -465,26 +427,26 @@ func (d *DynamicEnv) VerifyIdentities() error {
 	return errors.New("no matching identity found in recipients")
 }
 
-func (d *DynamicEnv) ReencryptAll() error {
+func (d *SecretManager) ReencryptAll() error {
 	err := d.VerifyIdentities()
 	if err != nil {
 		return err
 	}
 
-	envs := d.ListItems("")
-	for _, value := range envs {
-		d.SetEnv(value.Metadata.ID, value)
+	secrets := d.ListItems("")
+	for _, value := range secrets {
+		d.SetSecret(value.Data["__id"].(string), value)
 	}
 	return nil
 }
 
-func (d *DynamicEnv) ExportTree(outDir string, prefix string) ([]string, error) {
+func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, error) {
 	fs := filehandler.NewFileHandler(outDir, d.Config.Debug)
-	envs := d.ListItems(prefix)
-	fmt.Println("Loaded", len(envs), "files")
-	keys := make([]string, len(envs))
-	for _, value := range envs {
-		key := value.Metadata.ID
+	secrets := d.ListItems(prefix)
+	fmt.Println("Loaded", len(secrets), "files")
+	keys := make([]string, len(secrets))
+	for _, value := range secrets {
+		key := value.Data["__id"].(string)
 		keys = append(keys, key)
 		path, err := filepath.Rel(prefix, key)
 		path = strings.ReplaceAll(path, "\\", "/")
@@ -492,7 +454,7 @@ func (d *DynamicEnv) ExportTree(outDir string, prefix string) ([]string, error) 
 			return nil, fmt.Errorf("failed to get relative path: %w", err)
 		}
 
-		output, err := d.FormatValue(value, false)
+		output, err := d.FormatValue(value)
 		if err != nil {
 			return nil, fmt.Errorf("failed to format value: %w", err)
 		}
@@ -505,7 +467,7 @@ func (d *DynamicEnv) ExportTree(outDir string, prefix string) ([]string, error) 
 	return keys, nil
 }
 
-func (d *DynamicEnv) ImportTree(inDir string, prefix string) ([]string, error) {
+func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string) ([]string, error) {
 	fs := filehandler.NewFileHandler(inDir, d.Config.Debug)
 	files, err := fs.ListFiles("", "")
 	if err != nil {
@@ -519,16 +481,45 @@ func (d *DynamicEnv) ImportTree(inDir string, prefix string) ([]string, error) {
 			return nil, fmt.Errorf("failed to read file: %w", err)
 		}
 
-		dynamicEnvValue, err := d.ParseRawValue(value, false)
+		secret, err := d.ParseRawValue(value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse file: %w", err)
+			secret = &Secret{
+				Data: map[string]any{"__id": file},
+			}
+			if err := yaml.Unmarshal([]byte(value), &secret.Data); err != nil {
+				return nil, fmt.Errorf("failed to parse file: %w", err)
+			}
 		}
 
-		err = d.SetEnv(file, dynamicEnvValue)
-		if err != nil {
-			return nil, fmt.Errorf("failed to set env: %w", err)
+		id := secret.Data["__id"].(string)
+		sanitizedID := d.SanitizeID(id)
+
+		existing, err := d.GetSecret(sanitizedID)
+		if err == nil {
+			existingFormatted, _ := d.FormatValue(existing)
+			newFormatted, _ := d.FormatValue(secret)
+			if existingFormatted == newFormatted {
+				fmt.Printf("Warning: %q has identical data, skipping\n", sanitizedID)
+				continue
+			}
+
+			switch conflict {
+			case "abort":
+				return nil, fmt.Errorf("secret %q already exists, use --conflict skip or overwrite", sanitizedID)
+			case "skip":
+				fmt.Printf("Skipping %q (already exists)\n", sanitizedID)
+				continue
+			case "overwrite":
+			default:
+				return nil, fmt.Errorf("invalid --conflict value: %q (must be abort, skip, or overwrite)", conflict)
+			}
 		}
-		keys = append(keys, file)
+
+		err = d.SetSecret(sanitizedID, secret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to set secret: %w", err)
+		}
+		keys = append(keys, sanitizedID)
 	}
 	return keys, nil
 }

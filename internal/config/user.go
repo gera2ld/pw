@@ -1,9 +1,9 @@
 package config
 
 import (
-	"denv/internal/filehandler"
 	"errors"
 	"log"
+	"pw/internal/filehandler"
 
 	"gopkg.in/yaml.v3"
 )

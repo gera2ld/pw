@@ -7,4 +7,4 @@ build:
   go run build.go
 
 run *args:
-  go run ./cmd/denv "$@"
+  go run ./cmd/pw "$@"

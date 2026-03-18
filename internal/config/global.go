@@ -3,7 +3,6 @@ package config
 import (
 	"log"
 	"os"
-	"path/filepath"
 )
 
 type ConfigType struct {
@@ -17,15 +16,15 @@ type ConfigType struct {
 }
 
 func NewConfig() *ConfigType {
-	rootDir := os.Getenv("DENV_ROOT")
+	rootDir := os.Getenv("PW_ROOT")
 	if rootDir == "" {
-		rootDir = filepath.Join(os.Getenv("HOME"), ".config", "denv")
+		rootDir = "."
 	}
-	identities := os.Getenv("DENV_IDENTITIES")
+	identities := os.Getenv("PW_IDENTITIES")
 	if identities == "" {
-		identities = filepath.Join(os.Getenv("HOME"), ".keys", "identities")
+		identities = "./identities"
 	}
-	debug := os.Getenv("DENV_DEBUG") == "true"
+	debug := os.Getenv("PW_DEBUG") == "true"
 	if debug {
 		log.Printf("rootDir: %s", rootDir)
 		log.Printf("identities: %s", identities)
@@ -33,9 +32,9 @@ func NewConfig() *ConfigType {
 	return &ConfigType{
 		RootDir:    rootDir,
 		Identities: identities,
-		DataDir:    "env",
+		DataDir:    "vault",
 		EnvSuffix:  ".age",
-		IndexFile:  "temp/index.yml",
+		IndexFile:  "vault/index.dat.age",
 		ConfigFile: "config.yml",
 		Debug:      debug,
 	}

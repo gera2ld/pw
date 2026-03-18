@@ -1,62 +1,66 @@
 package cli
 
 import (
-	"denv/internal/env"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
+	"pw/internal/secrets"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-func NewRootCommand(version string, envManager *env.DynamicEnv) *cobra.Command {
+func NewRootCommand(version string, sm *secrets.SecretManager) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "denv",
-		Short:   "DEnv CLI",
+		Use:     "pw",
+		Short:   "Minimalist CLI Secret Manager",
 		Version: version,
 	}
 
-	cmd.AddCommand(newRunCommand(envManager))
-	cmd.AddCommand(newDeleteCommand(envManager))
-	cmd.AddCommand(newImportCommand(envManager))
-	cmd.AddCommand(newExportCommand(envManager))
-	cmd.AddCommand(newKeysCommand(envManager))
-	cmd.AddCommand(newRenameCommand(envManager))
-	cmd.AddCommand(newEditCommand(envManager))
-	cmd.AddCommand(newRecipientsCommand(envManager))
-	cmd.AddCommand(newRecipientAddCommand(envManager))
-	cmd.AddCommand(newRecipientDelCommand(envManager))
-	cmd.AddCommand(newReindexCommand(envManager))
-	cmd.AddCommand(newReencryptAllCommand(envManager))
-	cmd.AddCommand(newCatCommand(envManager))
+	cmd.AddCommand(newRunCommand(sm))
+	cmd.AddCommand(newRmCommand(sm))
+	cmd.AddCommand(newImportCommand(sm))
+	cmd.AddCommand(newExportCommand(sm))
+	cmd.AddCommand(newLsCommand(sm))
+	cmd.AddCommand(newMvCommand(sm))
+	cmd.AddCommand(newEditCommand(sm))
+	cmd.AddCommand(newRcpCommand(sm))
+	cmd.AddCommand(newReindexCommand(sm))
+	cmd.AddCommand(newShowCommand(sm))
 
 	return cmd
 }
 
-func newRunCommand(envManager *env.DynamicEnv) *cobra.Command {
-	var envKeys []string
+func newRunCommand(sm *secrets.SecretManager) *cobra.Command {
 	var export bool
 
 	cmd := &cobra.Command{
-		Use:   "run",
-		Short: "Run command with environment variables",
-		Long: `Run a command with environment variables loaded from the specified keys.
-You can also export the environment variables to stdout using the --export flag.`,
-		Args: cobra.ArbitraryArgs, // Accepts any arguments after the command
+		Use:   "run <id>... -- <command>",
+		Short: "Run command with secrets injected",
+		Long: `Run a command with secrets loaded from the specified IDs.
+Use -- to separate IDs from the command.`,
+		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			osEnvKeys := strings.Split(os.Getenv("DENV_KEYS"), ",")
-			for _, key := range osEnvKeys {
-				key = strings.TrimSpace(key)
-				if key != "" {
-					envKeys = append(envKeys, key)
+			sepIndex := -1
+			for i, arg := range args {
+				if arg == "--" {
+					sepIndex = i
+					break
 				}
 			}
 
-			envVars := envManager.GetEnvs(envKeys)
+			if sepIndex == -1 {
+				return errors.New("missing '--' separator between IDs and command")
+			}
+
+			ids := args[:sepIndex]
+			commandArgs := args[sepIndex+1:]
+			if len(commandArgs) == 0 {
+				return errors.New("no command provided after '--'")
+			}
+
+			envVars := sm.GetSecrets(ids)
 
 			if export {
 				for key, value := range envVars {
@@ -65,18 +69,13 @@ You can also export the environment variables to stdout using the --export flag.
 				return nil
 			}
 
-			if len(args) == 0 {
-				return errors.New("no command provided to run")
-			}
-
 			env := os.Environ()
 			for key, value := range envVars {
 				env = append(env, fmt.Sprintf("%s=%s", key, value))
 			}
 
-			command := args[0]
-			commandArgs := args[1:]
-			cmdExec := exec.Command(command, commandArgs...)
+			command := commandArgs[0]
+			cmdExec := exec.Command(command, commandArgs[1:]...)
 			cmdExec.Env = env
 			cmdExec.Stdout = os.Stdout
 			cmdExec.Stderr = os.Stderr
@@ -86,45 +85,50 @@ You can also export the environment variables to stdout using the --export flag.
 		},
 	}
 
-	cmd.Flags().StringArrayVarP(&envKeys, "env", "e", []string{}, "Keys to load environment variables")
 	cmd.Flags().BoolVar(&export, "export", false, "Print environment variables to stdout")
 
 	return cmd
 }
 
-func newDeleteCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newRmCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <key>",
-		Short: "Delete a key",
+		Use:   "rm <id>",
+		Short: "Delete the physical file and update index",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
-			err := envManager.DeleteEnv(key)
+			id := args[0]
+			err := sm.DeleteSecret(id)
 			return err
 		},
 	}
 }
 
-func newImportCommand(envManager *env.DynamicEnv) *cobra.Command {
-	return &cobra.Command{
+func newImportCommand(sm *secrets.SecretManager) *cobra.Command {
+	var conflict string
+
+	cmd := &cobra.Command{
 		Use:   "import <source>",
 		Short: "Import data from a directory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			source := args[0]
 
-			keys, err := envManager.ImportTree(source, "")
+			ids, err := sm.ImportTree(source, "", conflict)
 			if err != nil {
 				return fmt.Errorf("failed to import data from %s: %w", source, err)
 			}
 
-			fmt.Printf("Successfully imported %d keys from %s\n", len(keys), source)
+			fmt.Printf("Successfully imported %d ids from %s\n", len(ids), source)
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&conflict, "conflict", "abort", "Conflict resolution: abort, skip, or overwrite")
+
+	return cmd
 }
 
-func newExportCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newExportCommand(sm *secrets.SecretManager) *cobra.Command {
 	var outDir string
 	var prefix string
 
@@ -132,99 +136,92 @@ func newExportCommand(envManager *env.DynamicEnv) *cobra.Command {
 		Use:   "export",
 		Short: "Export all data to a directory",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Use the provided output directory and prefix
 			if outDir == "" {
-				outDir = "env-data" // Default output directory
+				outDir = "vault-export"
 			}
 
-			keys, err := envManager.ExportTree(outDir, prefix)
+			ids, err := sm.ExportTree(outDir, prefix)
 			if err != nil {
 				return fmt.Errorf("failed to export data: %w", err)
 			}
 
-			fmt.Printf("Exported %d keys to %s\n", len(keys), outDir)
+			fmt.Printf("Exported %d ids to %s\n", len(ids), outDir)
 			return nil
 		},
 	}
 
-	// Add flags for the output directory and prefix
-	cmd.Flags().StringVarP(&outDir, "outDir", "o", "env-data", "Output directory")
-	cmd.Flags().StringVar(&prefix, "prefix", "", "Filter the keys by the prefix and strip it when writing to files")
+	cmd.Flags().StringVarP(&outDir, "outDir", "o", "vault-export", "Output directory")
+	cmd.Flags().StringVar(&prefix, "prefix", "", "Filter the ids by the prefix and strip it when writing to files")
 
 	return cmd
 }
 
-func newKeysCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newLsCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
-		Use:   "keys",
-		Short: "List all keys",
+		Use:   "ls",
+		Short: "List all indexed __ids",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			keys, err := envManager.ListEnvs()
+			ids, err := sm.ListSecrets()
 			if err != nil {
 				return err
 			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				fmt.Println(key)
+			sort.Strings(ids)
+			for _, id := range ids {
+				fmt.Println(id)
 			}
 			return nil
 		},
 	}
 }
 
-func newRenameCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newMvCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
-		Use:   "rename <key> <newName>",
-		Short: "Rename a key",
+		Use:   "mv <id> <new_id>",
+		Short: "Update the __id field and refresh index",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
-			newName := args[1]
-			parsed, err := envManager.GetEnv(key)
+			id := args[0]
+			newID := args[1]
+			parsed, err := sm.GetSecret(id)
 			if err != nil {
 				return err
 			}
-			return envManager.SetEnv(newName, parsed)
+			return sm.SetSecret(newID, parsed)
 		},
 	}
 }
 
-func sanitizeKeyForFilename(key string) string {
-	re := regexp.MustCompile(`[^\w.-]`)
-	return re.ReplaceAllString(key, "_")
-}
-
-func newEditCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
-		Use:   "edit <key>",
-		Short: "Edit the value of a key with $EDITOR",
+		Use:   "edit <id>",
+		Short: "Edit the value of a secret with $EDITOR",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
+			id := args[0]
 
 			editor := os.Getenv("EDITOR")
 			if editor == "" {
 				return errors.New("$EDITOR is not set")
 			}
 
-			parsed, err := envManager.GetEnv(key)
+			parsed, err := sm.GetSecret(id)
+			var oldValue string
 			if err != nil {
-				fmt.Println("Editing new env")
-			}
-
-			var metadata env.DynamicEnvMetadata
-			oldValue := ""
-			if parsed != nil {
-				metadata = parsed.Metadata
-				value, err := envManager.FormatValue(parsed, false)
+				fmt.Println("Editing new secret")
+				oldValue = fmt.Sprintf("__id: %s\n", id)
+			} else {
+				if parsed.Data == nil {
+					parsed.Data = make(map[string]any)
+				}
+				value, err := sm.FormatValue(parsed)
 				if err != nil {
 					return fmt.Errorf("failed to format value: %w", err)
 				}
 				oldValue = value
 			}
 
-			safeKey := sanitizeKeyForFilename(key)
-			tempFile, err := os.CreateTemp("", fmt.Sprintf("%s-*.yml", safeKey))
+			safeID := sm.SanitizeID(id)
+			tempFile, err := os.CreateTemp("", fmt.Sprintf("%s-*.yml", safeID))
 			if err != nil {
 				return fmt.Errorf("failed to create temporary file: %w", err)
 			}
@@ -255,94 +252,90 @@ func newEditCommand(envManager *env.DynamicEnv) *cobra.Command {
 				return nil
 			}
 
-			parsed, err = envManager.ParseRawValue(newValue, false)
+			parsed, err = sm.ParseRawValue(newValue)
 			if err != nil {
-				return fmt.Errorf("failed to parse new value: %w", err)
+				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __id: %s", err, id)
 			}
-			parsed.Metadata = metadata
 
-			if err := envManager.SetEnv(key, parsed); err != nil {
+			if err := sm.SetSecret(id, parsed); err != nil {
 				return fmt.Errorf("failed to save updated value: %w", err)
 			}
 
-			fmt.Println("Updated key:", key)
+			fmt.Println("Updated id:", id)
 			return nil
 		},
 	}
 }
 
-func newRecipientsCommand(envManager *env.DynamicEnv) *cobra.Command {
-	return &cobra.Command{
-		Use:   "recipients",
+func newRcpCommand(sm *secrets.SecretManager) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rcp",
+		Short: "Manage age recipients (public keys)",
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "ls",
 		Short: "List all recipients",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			recipients := envManager.UserConfig.Data.Recipients
+			recipients := sm.UserConfig.Data.Recipients
 			for _, recipient := range recipients {
 				fmt.Println(recipient)
 			}
 			return nil
 		},
-	}
-}
+	})
 
-func newRecipientAddCommand(envManager *env.DynamicEnv) *cobra.Command {
-	return &cobra.Command{
-		Use:   "recipientAdd <recipient>",
+	cmd.AddCommand(&cobra.Command{
+		Use:   "add <recipient>",
 		Short: "Add a recipient",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			recipient := args[0]
-			return envManager.UserConfig.AddRecipient(recipient)
+			return sm.UserConfig.AddRecipient(recipient)
 		},
-	}
-}
+	})
 
-func newRecipientDelCommand(envManager *env.DynamicEnv) *cobra.Command {
-	return &cobra.Command{
-		Use:   "recipientDel <recipient>",
+	cmd.AddCommand(&cobra.Command{
+		Use:   "rm <recipient>",
 		Short: "Remove a recipient",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			recipient := args[0]
-			return envManager.UserConfig.RemoveRecipient(recipient)
+			return sm.UserConfig.RemoveRecipient(recipient)
 		},
-	}
+	})
+
+	return cmd
 }
 
-func newReindexCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newReindexCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
 		Use:   "reindex",
 		Short: "Rebuild index for all data",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return envManager.BuildIndex()
+			return sm.BuildIndex()
 		},
 	}
 }
 
-func newReencryptAllCommand(envManager *env.DynamicEnv) *cobra.Command {
+func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
-		Use:   "reencryptAll",
-		Short: "Reencrypt all data",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return envManager.ReencryptAll()
-		},
-	}
-}
-
-func newCatCommand(envManager *env.DynamicEnv) *cobra.Command {
-	return &cobra.Command{
-		Use:   "cat <key>",
-		Short: "Show the value of a key",
+		Use:   "show <id>",
+		Short: "Decrypt and print the full content to stdout",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
+			id := args[0]
 
-			parsed, err := envManager.GetEnv(key)
+			parsed, err := sm.GetSecret(id)
 			if err != nil {
-				return fmt.Errorf("failed to retrieve key: %w", err)
+				return fmt.Errorf("failed to retrieve secret: %w", err)
 			}
 
-			value, err := envManager.FormatValue(parsed, false)
+			if parsed.Data == nil {
+				parsed.Data = make(map[string]any)
+			}
+
+			value, err := sm.FormatValue(parsed)
 			if err != nil {
 				return fmt.Errorf("failed to format value: %w", err)
 			}
