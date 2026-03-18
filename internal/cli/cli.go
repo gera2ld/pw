@@ -186,7 +186,8 @@ func newMvCommand(sm *secrets.SecretManager) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return sm.SetSecret(newID, parsed)
+			parsed.Data["__id"] = newID
+			return sm.SetSecret(id, parsed)
 		},
 	}
 }
@@ -247,7 +248,7 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 			}
 			newValue := string(newValueBytes)
 
-			if newValue == "" || newValue == oldValue {
+			if newValue == "" {
 				fmt.Println("No changes made.")
 				return nil
 			}
@@ -257,11 +258,22 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __id: %s", err, id)
 			}
 
+			newID := parsed.Data["__id"].(string)
+
+			if newValue == oldValue && newID == id {
+				fmt.Println("No changes made.")
+				return nil
+			}
+
 			if err := sm.SetSecret(id, parsed); err != nil {
 				return fmt.Errorf("failed to save updated value: %w", err)
 			}
 
-			fmt.Println("Updated id:", id)
+			if newID != id {
+				fmt.Printf("Renamed %s to %s\n", id, newID)
+			} else {
+				fmt.Println("Updated id:", id)
+			}
 			return nil
 		},
 	}

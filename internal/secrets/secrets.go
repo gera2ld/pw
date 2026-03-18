@@ -166,7 +166,7 @@ func (d *SecretManager) ListSecretFiles(prefix string) ([]string, error) {
 		return nil, err
 	}
 
-	result := make([]string, len(files))
+	result := make([]string, 0, len(files))
 	for _, file := range files {
 		file = strings.ReplaceAll(file, "\\", "/")
 		result = append(result, file)
@@ -186,6 +186,9 @@ func (d *SecretManager) ListItems(prefix string) map[string]*Secret {
 
 	for _, file := range files {
 		if !strings.HasSuffix(file, d.Config.EnvSuffix) {
+			continue
+		}
+		if filepath.Join(d.Config.DataDir, file) == d.Config.IndexFile {
 			continue
 		}
 		value, err := d.Filehandler.ReadFile(filepath.Join(d.Config.DataDir, file))
@@ -218,7 +221,14 @@ func (d *SecretManager) LoadIndex() *map[string]string {
 	if err != nil {
 		return d.index
 	}
-	if err := yaml.Unmarshal([]byte(data), &index); err != nil {
+	decrypted, err := d.DecryptData(data)
+	if err != nil {
+		if d.Config.Debug {
+			log.Printf("Error decrypting index: %v\n", err)
+		}
+		return d.index
+	}
+	if err := yaml.Unmarshal([]byte(decrypted), &index); err != nil {
 		return d.index
 	}
 	return d.index
@@ -230,7 +240,11 @@ func (d *SecretManager) SaveIndex(index *map[string]string) error {
 		return err
 	}
 	d.index = index
-	return d.Filehandler.WriteFile(d.Config.IndexFile, string(indexContent))
+	encrypted, err := d.EncryptData(string(indexContent))
+	if err != nil {
+		return err
+	}
+	return d.Filehandler.WriteFile(d.Config.IndexFile, encrypted)
 }
 
 func (d *SecretManager) BuildIndex() error {
@@ -262,21 +276,25 @@ func (d *SecretManager) UpdateIndex(uid string, id string, idFrom string) error 
 
 func (d *SecretManager) GetSecretUID(key string) (string, error) {
 	index := d.LoadIndex()
-	uid := ""
 	for iUid, iId := range *index {
 		if iId == key {
-			uid = iUid
-			break
+			return iUid, nil
 		}
 	}
-	if uid == "" {
-		nid, err := gonanoid.New()
-		if err != nil {
-			return "", errors.New("failed to generate ID: " + err.Error())
-		}
-		uid = nid
+	return "", fmt.Errorf("secret %q not found", key)
+}
+
+func (d *SecretManager) GetOrCreateSecretUID(key string) (string, error) {
+	uid, err := d.GetSecretUID(key)
+	if err == nil {
+		return uid, nil
 	}
-	return uid, nil
+
+	nid, err := gonanoid.New()
+	if err != nil {
+		return "", errors.New("failed to generate ID: " + err.Error())
+	}
+	return nid, nil
 }
 
 func (d *SecretManager) GetSecretPath(uid string) string {
@@ -298,15 +316,24 @@ func (d *SecretManager) GetSecret(key string) (*Secret, error) {
 	return dynamicEnvValue, err
 }
 
-func (d *SecretManager) SetSecret(key string, value *Secret) error {
+func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 	if value == nil {
 		return errors.New("value is nil")
 	}
 
-	keyFrom := value.Data["__id"].(string)
-	value.Data["__id"] = key
+	newID := value.Data["__id"].(string)
 
-	uid, err := d.GetSecretUID(keyFrom)
+	if oldID != newID {
+		// Renaming: check if target key already exists
+		index := d.LoadIndex()
+		for _, id := range *index {
+			if id == newID {
+				return fmt.Errorf("secret %q already exists", newID)
+			}
+		}
+	}
+
+	uid, err := d.GetOrCreateSecretUID(oldID)
 	if err != nil {
 		return err
 	}
@@ -326,7 +353,7 @@ func (d *SecretManager) SetSecret(key string, value *Secret) error {
 		return err
 	}
 
-	return d.UpdateIndex(uid, key, keyFrom)
+	return d.UpdateIndex(uid, newID, oldID)
 }
 
 func (d *SecretManager) DeleteSecret(key string) error {
@@ -444,7 +471,7 @@ func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, erro
 	fs := filehandler.NewFileHandler(outDir, d.Config.Debug)
 	secrets := d.ListItems(prefix)
 	fmt.Println("Loaded", len(secrets), "files")
-	keys := make([]string, len(secrets))
+	keys := make([]string, 0, len(secrets))
 	for _, value := range secrets {
 		key := value.Data["__id"].(string)
 		keys = append(keys, key)
@@ -474,7 +501,7 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
 	fmt.Println("Loaded", len(files), "files")
-	keys := make([]string, len(files))
+	keys := make([]string, 0, len(files))
 	for _, file := range files {
 		value, err := fs.ReadFile(file)
 		if err != nil {
