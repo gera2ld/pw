@@ -41,23 +41,14 @@ func newRunCommand(sm *secrets.SecretManager) *cobra.Command {
 Use -- to separate IDs from the command.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sepIndex := -1
-			for i, arg := range args {
-				if arg == "--" {
-					sepIndex = i
-					break
-				}
-			}
+			dashIndex := cmd.ArgsLenAtDash()
 
-			if sepIndex == -1 {
+			if dashIndex == -1 {
 				return errors.New("missing '--' separator between IDs and command")
 			}
 
-			ids := args[:sepIndex]
-			commandArgs := args[sepIndex+1:]
-			if len(commandArgs) == 0 {
-				return errors.New("no command provided after '--'")
-			}
+			ids := args[:dashIndex]
+			targetCmd := args[dashIndex:]
 
 			envVars := sm.GetSecrets(ids)
 
@@ -66,8 +57,7 @@ Use -- to separate IDs from the command.`,
 				env = append(env, fmt.Sprintf("%s=%s", key, value))
 			}
 
-			command := commandArgs[0]
-			cmdExec := exec.Command(command, commandArgs[1:]...)
+			cmdExec := exec.Command(targetCmd[0], targetCmd[1:]...)
 			cmdExec.Env = env
 			cmdExec.Stdout = os.Stdout
 			cmdExec.Stderr = os.Stderr
