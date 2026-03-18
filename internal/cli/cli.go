@@ -11,12 +11,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewRootCommand(version string, sm *secrets.SecretManager) *cobra.Command {
+func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "pw",
 		Short:   "Minimalist CLI Secret Manager",
 		Version: version,
 	}
+	cmd.SetVersionTemplate("pw {{.Version}}\nbuilt at " + builtAt + "\n")
 
 	cmd.AddCommand(newRunCommand(sm))
 	cmd.AddCommand(newRmCommand(sm))
