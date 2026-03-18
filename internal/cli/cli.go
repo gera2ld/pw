@@ -28,13 +28,12 @@ func NewRootCommand(version string, sm *secrets.SecretManager) *cobra.Command {
 	cmd.AddCommand(newRcpCommand(sm))
 	cmd.AddCommand(newReindexCommand(sm))
 	cmd.AddCommand(newShowCommand(sm))
+	cmd.AddCommand(newEnvCommand(sm))
 
 	return cmd
 }
 
 func newRunCommand(sm *secrets.SecretManager) *cobra.Command {
-	var export bool
-
 	cmd := &cobra.Command{
 		Use:   "run <id>... -- <command>",
 		Short: "Run command with secrets injected",
@@ -62,13 +61,6 @@ Use -- to separate IDs from the command.`,
 
 			envVars := sm.GetSecrets(ids)
 
-			if export {
-				for key, value := range envVars {
-					fmt.Printf("%s=%s\n", key, value)
-				}
-				return nil
-			}
-
 			env := os.Environ()
 			for key, value := range envVars {
 				env = append(env, fmt.Sprintf("%s=%s", key, value))
@@ -84,8 +76,6 @@ Use -- to separate IDs from the command.`,
 			return cmdExec.Run()
 		},
 	}
-
-	cmd.Flags().BoolVar(&export, "export", false, "Print environment variables to stdout")
 
 	return cmd
 }
@@ -331,7 +321,7 @@ func newReindexCommand(sm *secrets.SecretManager) *cobra.Command {
 }
 
 func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "show <id>",
 		Short: "Decrypt and print the full content to stdout",
 		Args:  cobra.ExactArgs(1),
@@ -356,4 +346,32 @@ func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 			return nil
 		},
 	}
+
+	return cmd
+}
+
+func newEnvCommand(sm *secrets.SecretManager) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "env <id>...",
+		Short: "Print merged environment variables to stdout",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			merged := make(map[string]string)
+			for _, id := range args {
+				vars, err := sm.ParseSecret(id)
+				if err != nil {
+					return fmt.Errorf("failed to parse secret %q: %w", id, err)
+				}
+				for key, value := range vars.Env {
+					merged[key] = value
+				}
+			}
+			for key, value := range merged {
+				fmt.Printf("%s=%s\n", key, value)
+			}
+			return nil
+		},
+	}
+
+	return cmd
 }
