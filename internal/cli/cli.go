@@ -1,14 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"pw/internal/secrets"
-	"sort"
+	"slices"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *cobra.Command {
@@ -146,7 +148,7 @@ func newLsCommand(sm *secrets.SecretManager) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sort.Strings(ids)
+			slices.Sort(ids)
 			for _, id := range ids {
 				fmt.Println(id)
 			}
@@ -316,9 +318,11 @@ func newReindexCommand(sm *secrets.SecretManager) *cobra.Command {
 }
 
 func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
+	var showPayload, showRaw, showJSON bool
+
 	cmd := &cobra.Command{
 		Use:   "show <id>",
-		Short: "Decrypt and print the full content to stdout",
+		Short: "Decrypt and print secret content",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -332,15 +336,41 @@ func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 				parsed.Data = make(map[string]any)
 			}
 
-			value, err := sm.FormatValue(parsed)
-			if err != nil {
-				return fmt.Errorf("failed to format value: %w", err)
+			if showJSON {
+				data, err := json.MarshalIndent(parsed.Data, "", "  ")
+				if err != nil {
+					return fmt.Errorf("failed to marshal JSON: %w", err)
+				}
+				fmt.Println(string(data))
+				return nil
 			}
 
-			fmt.Println(value)
+			if showPayload {
+				fmt.Print(parsed.Payload)
+				return nil
+			}
+
+			if showRaw {
+				value, err := sm.FormatValue(parsed)
+				if err != nil {
+					return fmt.Errorf("failed to format value: %w", err)
+				}
+				fmt.Print(value)
+				return nil
+			}
+
+			data, err := yaml.Marshal(parsed.Data)
+			if err != nil {
+				return fmt.Errorf("failed to marshal data: %w", err)
+			}
+			fmt.Print(string(data))
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&showJSON, "json", false, "Show data as JSON")
+	cmd.Flags().BoolVar(&showPayload, "payload", false, "Show payload only")
+	cmd.Flags().BoolVar(&showRaw, "raw", false, "Show full raw content (data + payload)")
 
 	return cmd
 }
