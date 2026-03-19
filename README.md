@@ -6,7 +6,7 @@ pw is a local-first, cross-platform, and Git-friendly secret manager.
 
 - **Metadata privacy**: Randomized filenames (nanoids) prevent metadata leakage in cloud backups
 - **Per-entry Git granularity**: Each secret is a standalone encrypted file
-- **Variable expansion**: Supports `$xxx` substitution within secrets
+- **Variable expansion**: Supports `{{._var}}` substitution for local variables
 - **Zero-leakage**: Plaintext never hits the disk (piped through memory)
 
 ## Prerequisites
@@ -26,7 +26,7 @@ pw edit my-api
 # __id: my-api
 # _base_url: https://api.example.com
 # API_KEY: secret123
-# ENDPOINT: $_base_url/v1
+# ENDPOINT: '{{._base_url}}/v1'
 
 # Run command with secrets injected
 pw run my-api -- env
@@ -53,7 +53,7 @@ SECRET_KEY: value
 ### Naming Conventions
 
 - `__xxx` (Internal): Reserved for tool metadata (e.g., `__id`). Not injected.
-- `_xxx` (Local): Private variables for expansion, not injected.
+- `_xxx` (Local): Private variables for expansion (use `{{._xxx}}` to reference), not injected.
 - `xxx` (Export): Standard environment variables, injected during `run`.
 
 ## Usage

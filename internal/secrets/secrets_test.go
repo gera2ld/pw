@@ -147,11 +147,7 @@ func TestFormatValue(t *testing.T) {
 func TestParseSecret(t *testing.T) {
 	d := &SecretManager{}
 
-	parsed, err := d.ParseRawValue(`__id: my-api
-_base_url: https://api.example.com
-API_KEY: secret123
-ENDPOINT: $_base_url/v1
-`)
+	parsed, err := d.ParseRawValue("__id: my-api\n_base_url: \"https://api.example.com\"\nAPI_KEY: secret123\nENDPOINT: '{{._base_url}}/v1'\n_PASSWORD: p@ss$word!\n")
 	if err != nil {
 		t.Fatalf("ParseRawValue() error = %v", err)
 	}
@@ -185,5 +181,8 @@ ENDPOINT: $_base_url/v1
 	}
 	if result.Env["API_KEY"] != "secret123" {
 		t.Errorf("Env API_KEY = %q, want %q", result.Env["API_KEY"], "secret123")
+	}
+	if result.Local["_PASSWORD"] != "p@ss$word!" {
+		t.Errorf("Local _PASSWORD = %q, want %q", result.Local["_PASSWORD"], "p@ss$word!")
 	}
 }

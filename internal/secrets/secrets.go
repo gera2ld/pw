@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"text/template"
 
 	"pw/internal/config"
 	"pw/internal/filehandler"
@@ -406,15 +406,17 @@ func (d *SecretManager) ParseSecret(key string) (*Vars, error) {
 }
 
 func resolveVariables(value string, local map[string]string) string {
-	return os.Expand(value, func(variable string) string {
-		if variable == "$" {
-			return "$"
-		}
-		if val, ok := local[variable]; ok {
-			return val
-		}
-		return ""
-	})
+	tmpl := template.New("").
+		Option("missingkey=zero")
+	tmpl, err := tmpl.Parse(value)
+	if err != nil {
+		return value
+	}
+	var sb strings.Builder
+	if err := tmpl.Execute(&sb, local); err != nil {
+		return value
+	}
+	return sb.String()
 }
 
 func (d *SecretManager) GetSecrets(keys []string) map[string]string {
