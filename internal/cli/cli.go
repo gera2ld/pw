@@ -239,6 +239,10 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __id: %s", err, id)
 			}
 
+			if err := sm.ValidateTemplates(parsed); err != nil {
+				return fmt.Errorf("failed to validate templates: %w", err)
+			}
+
 			newID := parsed.Data["__id"].(string)
 
 			if newValue == oldValue && newID == id {

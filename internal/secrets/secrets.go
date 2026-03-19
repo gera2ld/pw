@@ -83,6 +83,16 @@ func (d *SecretManager) ParseRawValue(value string) (*Secret, error) {
 	}, nil
 }
 
+func (d *SecretManager) ValidateTemplates(secret *Secret) error {
+	for k, v := range secret.Data {
+		strVal := fmt.Sprintf("%v", v)
+		if _, err := template.New("").Option("missingkey=zero").Parse(strVal); err != nil {
+			return fmt.Errorf("invalid template in field %q: %w", k, err)
+		}
+	}
+	return nil
+}
+
 func indexOf(lines []string, target string, offset int) int {
 	for i := offset; i < len(lines); i++ {
 		if lines[i] == target {
@@ -504,6 +514,7 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 	}
 	fmt.Println("Loaded", len(files), "files")
 	keys := make([]string, 0, len(files))
+	skipped := make([]string, 0)
 	for _, file := range files {
 		value, err := fs.ReadFile(file)
 		if err != nil {
@@ -518,6 +529,12 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 			if err := yaml.Unmarshal([]byte(value), &secret.Data); err != nil {
 				return nil, fmt.Errorf("failed to parse file: %w", err)
 			}
+		}
+
+		if err := d.ValidateTemplates(secret); err != nil {
+			fmt.Printf("Skipping %q (invalid template: %v)\n", file, err)
+			skipped = append(skipped, file)
+			continue
 		}
 
 		id := secret.Data["__id"].(string)
@@ -549,6 +566,9 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 			return nil, fmt.Errorf("failed to set secret: %w", err)
 		}
 		keys = append(keys, sanitizedID)
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("Skipped %d file(s) due to invalid templates: %v\n", len(skipped), skipped)
 	}
 	return keys, nil
 }

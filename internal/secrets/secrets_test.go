@@ -186,3 +186,26 @@ func TestParseSecret(t *testing.T) {
 		t.Errorf("Local _PASSWORD = %q, want %q", result.Local["_PASSWORD"], "p@ss$word!")
 	}
 }
+
+func TestValidateTemplates(t *testing.T) {
+	d := &SecretManager{}
+
+	valid := "__id: test\nURL: '{{._base}}/api'\n"
+	invalid := "__id: test\nURL: '{{._base'\n"
+
+	secret, err := d.ParseRawValue(valid)
+	if err != nil {
+		t.Fatalf("ParseRawValue() error = %v", err)
+	}
+	if err := d.ValidateTemplates(secret); err != nil {
+		t.Errorf("ValidateTemplates() valid = %v", err)
+	}
+
+	secret, err = d.ParseRawValue(invalid)
+	if err != nil {
+		t.Fatalf("ParseRawValue() error = %v", err)
+	}
+	if err := d.ValidateTemplates(secret); err == nil {
+		t.Errorf("ValidateTemplates() invalid = expected error, got nil")
+	}
+}
