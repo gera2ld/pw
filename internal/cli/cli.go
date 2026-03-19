@@ -66,7 +66,14 @@ Use -- to separate IDs from the command.`,
 			cmdExec.Stderr = os.Stderr
 			cmdExec.Stdin = os.Stdin
 
-			return cmdExec.Run()
+			err := cmdExec.Run()
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					os.Exit(exitErr.ExitCode())
+				}
+				return fmt.Errorf("failed to run command: %w", err)
+			}
+			return nil
 		},
 	}
 
