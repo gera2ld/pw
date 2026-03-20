@@ -13,10 +13,38 @@ pw is a local-first, cross-platform, and Git-friendly secret manager.
 
 - **[age](https://github.com/FiloSottile/age)**: Encryption tool
 
+## Installation
+
+```bash
+curl -sL https://raw.githubusercontent.com/gera2ld/pw/main/install.sh | sh
+```
+
+This installs `pw` to `~/.local/bin/pw`. Add that directory to your PATH.
+
+<details>
+<summary>Manual install</summary>
+
+1. Download the latest release from GitHub
+2. Make it executable: `chmod +x pw`
+3. Move to your PATH: `mv pw ~/.local/bin/`
+
+</details>
+
+Install *age* (required dependency):
+
+```bash
+mise use -g age
+# or: brew install age
+# or: go install github.com/FiloSottile/age/cmd/age@latest
+```
+
 ## Quick Start
 
 ```bash
-# Initialize recipients (add your age public key)
+# 1. Generate an age identity (private key)
+age-keygen -o ~/.config/pw/identities
+
+# 2. Initialize recipients (add your age public key from step 1)
 pw rcp add age1...
 
 # Create a secret
@@ -37,6 +65,9 @@ pw ls
 # Show a secret
 pw show my-api
 ```
+
+> [!WARNING]
+> Your identity file is the only way to decrypt your secrets. If you lose it, your data is permanently inaccessible. Back it up securely.
 
 ## Data Schema
 
