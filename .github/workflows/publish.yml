@@ -2,8 +2,8 @@ name: Publish
 
 on:
   push:
-    tags:
-      - v*
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,7 +19,17 @@ jobs:
           go-version: '^1.24.3'
       - name: Build
         run: go run build.go
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: bin/*
+        env:
+          BUILD_REPO: ${{ github.repository }}
+      - name: Create Latest Release
+        run: |
+          VERSION=$(cat bin/version.txt)
+          if gh release view latest --repo ${{ github.repository }} &>/dev/null; then
+            gh release delete latest --yes --repo ${{ github.repository }}
+          fi
+          gh release create latest --repo ${{ github.repository }} \
+            --title "pw $VERSION" \
+            --prerelease \
+            bin/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

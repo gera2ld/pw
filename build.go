@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -30,14 +31,14 @@ var args = [][]string{
 	{"linux", "arm64"},
 }
 
-func getCommit() string {
-	cmd := exec.Command("git", "describe", "--always", "--tags")
-	output, err := cmd.Output()
+func getVersion() string {
+	hash, err := exec.Command("git", "rev-parse", "--short=7", "HEAD").Output()
 	if err != nil {
 		log.Fatalf("Error getting commit: %s\n", err)
 	}
-	result := string(output)
-	return strings.TrimSpace(result)
+	hashStr := strings.TrimSpace(string(hash))
+	now := time.Now().UTC()
+	return fmt.Sprintf("%d.%d.%d-%s", now.Year()-2000, now.Month(), now.Day(), hashStr)
 }
 
 func getItem(name string) Item {
@@ -54,10 +55,10 @@ func getItem(name string) Item {
 }
 
 func build() BuildResult {
-	commit := getCommit()
-	log.Printf("Build commit: %s\n", commit)
+	version := getVersion()
+	log.Printf("Build version: %s\n", version)
 	result := BuildResult{
-		Commit: commit,
+		Commit: version,
 	}
 	for _, item := range args {
 		buildOs := item[0]
@@ -66,17 +67,17 @@ func build() BuildResult {
 		if buildOs == "windows" {
 			suffix = ".exe"
 		}
-		now := time.Now().Format(time.RFC3339)
+		now := time.Now().UTC().Format(time.RFC3339)
 		log.Printf("Build os=%s, arch=%s\n", buildOs, buildArch)
 		name := "pw-" + buildOs + "-" + buildArch + suffix
 		cmd := exec.Command(
 			"go",
 			"build",
 			"-ldflags",
-			"-s -w -X main.version="+commit+" -X main.builtAt="+now,
+			"-s -w -X main.version="+version+" -X main.builtAt="+now+getRepoLDFlag(),
 			"-trimpath",
 			"-o",
-			"bin/"+name,
+			binDir+"/"+name,
 			"./cmd/pw",
 		)
 		env := os.Environ()
@@ -89,7 +90,17 @@ func build() BuildResult {
 		}
 		result.Items = append(result.Items, getItem(name))
 	}
+	os.WriteFile(binDir+"/version.txt", []byte(version), 0644)
+	log.Printf("Wrote version to %s/version.txt\n", binDir)
 	return result
+}
+
+func getRepoLDFlag() string {
+	repo := os.Getenv("BUILD_REPO")
+	if repo == "" {
+		return ""
+	}
+	return " -X pw/internal/update.Repo=" + repo
 }
 
 func main() {

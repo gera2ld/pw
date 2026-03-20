@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"pw/internal/secrets"
+	"pw/internal/update"
 	"slices"
 
 	"github.com/spf13/cobra"
@@ -32,6 +33,9 @@ func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *
 	cmd.AddCommand(newReindexCommand(sm))
 	cmd.AddCommand(newShowCommand(sm))
 	cmd.AddCommand(newEnvCommand(sm))
+	if update.Repo != "" {
+		cmd.AddCommand(newUpdateCommand(version))
+	}
 
 	return cmd
 }
@@ -404,6 +408,55 @@ func newEnvCommand(sm *secrets.SecretManager) *cobra.Command {
 			return nil
 		},
 	}
+
+	return cmd
+}
+
+func newUpdateCommand(currentVersion string) *cobra.Command {
+	var checkOnly bool
+
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Check for and install updates",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			latest, found, err := update.CheckLatest()
+			if err != nil {
+				return fmt.Errorf("failed to check for updates: %w", err)
+			}
+			if !found {
+				fmt.Println("No update available for this platform")
+				return nil
+			}
+
+			if latest != "" && latest == currentVersion {
+				fmt.Println("Already up to date")
+				return nil
+			}
+
+			fmt.Printf("Current: %s\n", currentVersion)
+			if latest != "" {
+				fmt.Printf("Latest: %s\n", latest)
+			}
+			if checkOnly {
+				return nil
+			}
+
+			fmt.Print("Update to latest? (y/N) ")
+			var confirm string
+			fmt.Scanln(&confirm)
+			if confirm != "y" && confirm != "Y" {
+				fmt.Println("Aborted")
+				return nil
+			}
+
+			if err := update.Install(); err != nil {
+				return fmt.Errorf("failed to install update: %w", err)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, don't install")
 
 	return cmd
 }
