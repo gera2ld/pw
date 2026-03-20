@@ -3,6 +3,8 @@ package config
 import (
 	"log"
 	"os"
+	"os/user"
+	"path/filepath"
 )
 
 type ConfigType struct {
@@ -16,13 +18,16 @@ type ConfigType struct {
 }
 
 func NewConfig() *ConfigType {
+	usr, _ := user.Current()
+	homeDir := usr.HomeDir
+
 	rootDir := os.Getenv("PW_ROOT")
 	if rootDir == "" {
-		rootDir = "."
+		rootDir = filepath.Join(homeDir, ".config", "pw")
 	}
 	identities := os.Getenv("PW_IDENTITIES")
 	if identities == "" {
-		identities = "./identities"
+		identities = filepath.Join(rootDir, "identities")
 	}
 	debug := os.Getenv("PW_DEBUG") == "true"
 	if debug {

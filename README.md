@@ -106,14 +106,15 @@ SECRET_KEY: value
 
 Default locations (can be overridden with env vars):
 
-- `PW_ROOT`: Vault root (default: `.`)
-- `PW_IDENTITIES`: Age identity file (default: `./identities`)
+- `PW_ROOT`: Vault root (default: `~/.config/pw`)
+- `PW_IDENTITIES`: Age identity file (default: `$PW_ROOT/identities`)
 - `PW_DEBUG`: Enable debug logging
 
 ## Storage
 
+Default `~/.config/pw/`:
 ```
-.
+~/.config/pw/
 ├── vault/
 │   ├── index.dat.age    # Encrypted index mapping nanoids to IDs
 │   └── <nanoid>.age      # Individual secret files
