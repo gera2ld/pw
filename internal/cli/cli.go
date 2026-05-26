@@ -10,6 +10,7 @@ import (
 	"pw/internal/update"
 	"slices"
 
+	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -215,8 +216,11 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				oldValue = value
 			}
 
-			safeID := sm.SanitizeID(id)
-			tempFile, err := os.CreateTemp("", fmt.Sprintf("%s-*.yml", safeID))
+			nid, err := gonanoid.New()
+			if err != nil {
+				return fmt.Errorf("failed to generate temp ID: %w", err)
+			}
+			tempFile, err := os.CreateTemp("", fmt.Sprintf("pw-edit-%s-*.yml", nid))
 			if err != nil {
 				return fmt.Errorf("failed to create temporary file: %w", err)
 			}
