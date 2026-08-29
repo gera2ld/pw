@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,7 @@ func TestParseRawValue(t *testing.T) {
 	}{
 		{
 			name:        "basic with data",
-			value:       "__id: github-token\nTOKEN: ghp_abc123\n",
+			value:       "__name: github-token\nTOKEN: ghp_abc123\n",
 			wantID:      "github-token",
 			wantData:    map[string]any{"TOKEN": "ghp_abc123"},
 			wantPayload: "",
@@ -27,7 +28,7 @@ func TestParseRawValue(t *testing.T) {
 		},
 		{
 			name:        "with data and payload",
-			value:       "__id: ssh-key\nKEY: value\n---\n-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n",
+			value:       "__name: ssh-key\nKEY: value\n---\n-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n",
 			wantID:      "ssh-key",
 			wantData:    map[string]any{"KEY": "value"},
 			wantPayload: "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n",
@@ -35,7 +36,7 @@ func TestParseRawValue(t *testing.T) {
 		},
 		{
 			name:   "with local and export vars",
-			value:  "__id: my-api\n_base_url: https://api.example.com\nAPI_KEY: secret123\nENDPOINT: $_base_url/v1\n",
+			value:  "__name: my-api\n_base_url: https://api.example.com\nAPI_KEY: secret123\nENDPOINT: $_base_url/v1\n",
 			wantID: "my-api",
 			wantData: map[string]any{
 				"_base_url": "https://api.example.com",
@@ -46,13 +47,13 @@ func TestParseRawValue(t *testing.T) {
 			wantErr:     false,
 		},
 		{
-			name:    "missing __id",
+			name:    "missing __name",
 			value:   "FOO: bar\nBAZ: qux\n",
 			wantErr: true,
 		},
 		{
-			name:        "just __id with payload",
-			value:       "__id: test\n---\nraw payload data\n",
+			name:        "just __name with payload",
+			value:       "__name: test\n---\nraw payload data\n",
 			wantID:      "test",
 			wantData:    map[string]any{},
 			wantPayload: "raw payload data\n",
@@ -60,7 +61,7 @@ func TestParseRawValue(t *testing.T) {
 		},
 		{
 			name:        "empty data with payload",
-			value:       "__id: test\n---\n",
+			value:       "__name: test\n---\n",
 			wantID:      "test",
 			wantData:    map[string]any{},
 			wantPayload: "",
@@ -78,8 +79,8 @@ func TestParseRawValue(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got.Data["__id"].(string) != tt.wantID {
-				t.Errorf("Data[__id] = %v, want %v", got.Data["__id"], tt.wantID)
+			if got.Data["__name"].(string) != tt.wantID {
+				t.Errorf("Data[__name] = %v, want %v", got.Data["__name"], tt.wantID)
 			}
 			for k, v := range tt.wantData {
 				if got.Data[k] != v {
@@ -90,7 +91,7 @@ func TestParseRawValue(t *testing.T) {
 				t.Errorf("Payload = %q, want %q", got.Payload, tt.wantPayload)
 			}
 			t.Logf("Input: %q", tt.value)
-			t.Logf("Got: ID=%q, Data=%+v, Payload=%q", got.Data["__id"], got.Data, got.Payload)
+			t.Logf("Got: ID=%q, Data=%+v, Payload=%q", got.Data["__name"], got.Data, got.Payload)
 		})
 	}
 }
@@ -106,23 +107,23 @@ func TestFormatValue(t *testing.T) {
 		{
 			name: "basic with data",
 			value: &Secret{
-				Data:    map[string]any{"__id": "github-token", "TOKEN": "ghp_abc123"},
+				Data:    map[string]any{"__name": "github-token", "TOKEN": "ghp_abc123"},
 				Payload: "",
 			},
-			wantContains: []string{"__id: github-token", "TOKEN: ghp_abc123"},
+			wantContains: []string{"__name: github-token", "TOKEN: ghp_abc123"},
 		},
 		{
 			name: "with payload",
 			value: &Secret{
-				Data:    map[string]any{"__id": "ssh-key", "KEY": "value"},
+				Data:    map[string]any{"__name": "ssh-key", "KEY": "value"},
 				Payload: "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
 			},
-			wantContains: []string{"__id: ssh-key", "KEY: value", "-----BEGIN OPENSSH PRIVATE KEY-----"},
+			wantContains: []string{"__name: ssh-key", "KEY: value", "-----BEGIN OPENSSH PRIVATE KEY-----"},
 		},
 		{
 			name: "just data",
 			value: &Secret{
-				Data: map[string]any{"__id": "test", "FOO": "bar"},
+				Data: map[string]any{"__name": "test", "FOO": "bar"},
 			},
 			wantContains: []string{"FOO: bar"},
 		},
@@ -147,7 +148,7 @@ func TestFormatValue(t *testing.T) {
 func TestParseSecret(t *testing.T) {
 	d := &SecretManager{}
 
-	parsed, err := d.ParseRawValue("__id: my-api\n_base_url: \"https://api.example.com\"\nAPI_KEY: secret123\nENDPOINT: '{{._base_url}}/v1'\n_PASSWORD: p@ss$word!\n")
+	parsed, err := d.ParseRawValue("__name: my-api\n_base_url: \"https://api.example.com\"\nAPI_KEY: secret123\nENDPOINT: '{{._base_url}}/v1'\n_PASSWORD: p@ss$word!\n")
 	if err != nil {
 		t.Fatalf("ParseRawValue() error = %v", err)
 	}
@@ -190,8 +191,8 @@ func TestParseSecret(t *testing.T) {
 func TestValidateTemplates(t *testing.T) {
 	d := &SecretManager{}
 
-	valid := "__id: test\nURL: '{{._base}}/api'\n"
-	invalid := "__id: test\nURL: '{{._base'\n"
+	valid := "__name: test\nURL: '{{._base}}/api'\n"
+	invalid := "__name: test\nURL: '{{._base'\n"
 
 	secret, err := d.ParseRawValue(valid)
 	if err != nil {
@@ -207,5 +208,62 @@ func TestValidateTemplates(t *testing.T) {
 	}
 	if err := d.ValidateTemplates(secret); err == nil {
 		t.Errorf("ValidateTemplates() invalid = expected error, got nil")
+	}
+}
+
+func TestNormalizeFilename(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"My Pass", "my-pass"},
+		{"my_pass", "my_pass"},
+		{"my-pass", "my-pass"},
+		{"My.Var@host", "my-var-host"},
+		{"A_B-C", "a_b-c"},
+		{strings.Repeat("a", 50), strings.Repeat("a", 40)},
+		{"!!!", "secret"},
+	}
+	for _, tt := range tests {
+		if got := normalizeFilename(tt.name); got != tt.want {
+			t.Errorf("normalizeFilename(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestIsReadableFilename(t *testing.T) {
+	tests := []struct {
+		uid  string
+		name string
+		want bool
+	}{
+		{"db/prod/password", "password", true},
+		{"db/prod/my-pass", "my-pass", true},
+		{"db/prod/my_pass", "my_pass", true},
+		{"db/prod/my-pass.2", "my pass", true},
+		{"db/prod/abc123def456", "password", false},
+	}
+	for _, tt := range tests {
+		if got := isReadableFilename(tt.uid, tt.name); got != tt.want {
+			t.Errorf("isReadableFilename(%q, %q) = %v, want %v", tt.uid, tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestUniqueReadableUID(t *testing.T) {
+	d := &SecretManager{}
+	index := map[string]string{
+		filepath.Join("db/prod", "password"):   "db/prod/password",
+		filepath.Join("db/prod", "password.2"): "db/prod/password2",
+	}
+
+	// No exclusion: first free is password.3.
+	if got := d.uniqueReadableUID(filepath.Join("db/prod", "password"), &index, ""); got != filepath.Join("db/prod", "password.3") {
+		t.Errorf("uniqueReadableUID() = %q, want %q", got, filepath.Join("db/prod", "password.3"))
+	}
+
+	// Excluding the current uid: still must be free (password.3).
+	if got := d.uniqueReadableUID(filepath.Join("db/prod", "password"), &index, filepath.Join("db/prod", "password")); got != filepath.Join("db/prod", "password.3") {
+		t.Errorf("uniqueReadableUID() = %q, want %q", got, filepath.Join("db/prod", "password.3"))
 	}
 }

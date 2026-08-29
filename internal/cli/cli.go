@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"pw/internal/secrets"
 	"pw/internal/update"
 	"slices"
@@ -56,6 +57,11 @@ Use -- to separate IDs from the command.`,
 			}
 
 			ids := args[:dashIndex]
+			for _, id := range ids {
+				if !secrets.IsValidKey(id) {
+					return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+				}
+			}
 			targetCmd := args[dashIndex:]
 
 			envVars := sm.GetSecrets(ids)
@@ -92,6 +98,9 @@ func newRmCommand(sm *secrets.SecretManager) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
+			if !secrets.IsValidKey(id) {
+				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+			}
 			err := sm.DeleteSecret(id)
 			return err
 		},
@@ -154,7 +163,7 @@ func newExportCommand(sm *secrets.SecretManager) *cobra.Command {
 func newLsCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
-		Short: "List all indexed __ids",
+		Short: "List all indexed secrets",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ids, err := sm.ListSecrets()
 			if err != nil {
@@ -172,16 +181,28 @@ func newLsCommand(sm *secrets.SecretManager) *cobra.Command {
 func newMvCommand(sm *secrets.SecretManager) *cobra.Command {
 	return &cobra.Command{
 		Use:   "mv <id> <new_id>",
-		Short: "Update the __id field and refresh index",
+		Short: "Rename a secret and refresh index",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 			newID := args[1]
+			if !secrets.IsValidKey(id) {
+				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+			}
+			if !secrets.IsValidKey(newID) {
+				return fmt.Errorf("invalid id %q: each part must be a valid name", newID)
+			}
 			parsed, err := sm.GetSecret(id)
 			if err != nil {
 				return err
 			}
-			parsed.Data["__id"] = newID
+			// __name is relative; store a path relative to the old id's directory
+			// so SetSecret can mirror it correctly.
+			rel, err := filepath.Rel(filepath.Dir(id), newID)
+			if err != nil {
+				rel = filepath.Base(newID)
+			}
+			parsed.Data["__name"] = rel
 			return sm.SetSecret(id, parsed)
 		},
 	}
@@ -194,6 +215,9 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
+			if !secrets.IsValidKey(id) {
+				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+			}
 
 			editor := os.Getenv("EDITOR")
 			if editor == "" {
@@ -204,7 +228,7 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 			var oldValue string
 			if err != nil {
 				fmt.Println("Editing new secret")
-				oldValue = fmt.Sprintf("__id: %s\n", id)
+				oldValue = fmt.Sprintf("__name: %s\n", filepath.Base(id))
 			} else {
 				if parsed.Data == nil {
 					parsed.Data = make(map[string]any)
@@ -253,14 +277,21 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 
 			parsed, err = sm.ParseRawValue(newValue)
 			if err != nil {
-				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __id: %s", err, id)
+				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __name: %s", err, id)
 			}
 
 			if err := sm.ValidateTemplates(parsed); err != nil {
 				return fmt.Errorf("failed to validate templates: %w", err)
 			}
 
-			newID := parsed.Data["__id"].(string)
+			rawName := parsed.Data["__name"].(string)
+			// __name is always relative (may contain "/" for sub-paths);
+			// it is mirrored to directories relative to dirname(id).
+			newID := filepath.Join(filepath.Dir(id), rawName)
+			if newID == "." {
+				newID = rawName
+			}
+			newID = filepath.Clean(newID)
 
 			if newValue == oldValue && newID == id {
 				fmt.Println("No changes made.")
@@ -341,6 +372,9 @@ func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
+			if !secrets.IsValidKey(id) {
+				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+			}
 
 			parsed, err := sm.GetSecret(id)
 			if err != nil {
@@ -396,6 +430,11 @@ func newEnvCommand(sm *secrets.SecretManager) *cobra.Command {
 		Short: "Print merged environment variables to stdout",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			for _, id := range args {
+				if !secrets.IsValidKey(id) {
+					return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+				}
+			}
 			merged := make(map[string]string)
 			for _, id := range args {
 				vars, err := sm.ParseSecret(id)

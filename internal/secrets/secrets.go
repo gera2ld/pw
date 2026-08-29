@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -16,6 +18,22 @@ import (
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"gopkg.in/yaml.v3"
 )
+
+// maxFilenameLen caps the sanitized base name of a secret file (before the
+// uniqueness suffix and the .age extension) so on-disk paths stay portable.
+const maxFilenameLen = 40
+
+// nanoidAlphabet / nanoidLen control the generated filenames used in obscure
+// mode. Lowercase, digits, underscore and hyphen so on-disk names are friendly.
+const (
+	nanoidAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz_-"
+	nanoidLen      = 12
+)
+
+// newNanoid returns a fresh lowercase random id used as an obscure-mode filename.
+func newNanoid() (string, error) {
+	return gonanoid.Generate(nanoidAlphabet, nanoidLen)
+}
 
 type Secret struct {
 	Data    map[string]any
@@ -38,16 +56,60 @@ func NewSecretManager(config *config.ConfigType, userConfig *config.UserConfigTy
 	return &SecretManager{Config: config, UserConfig: userConfig, Filehandler: filehandler}
 }
 
-func (d *SecretManager) GetFilePath(path string) string {
-	if strings.HasPrefix(path, d.Config.DataDir+"/") {
-		return path + d.Config.EnvSuffix
-	}
-	return path
+func sanitizeIDString(id string) string {
+	re := regexp.MustCompile(`[^\w+\-/@.]`)
+	return re.ReplaceAllString(id, "-")
 }
 
 func (d *SecretManager) SanitizeID(id string) string {
-	re := regexp.MustCompile(`[^\w+\-/@.]`)
-	return re.ReplaceAllString(id, "-")
+	return sanitizeIDString(id)
+}
+
+// nonAlnumRe matches runs of characters that are not part of a lowercase
+// filename (letters, digits, underscore, hyphen), collapsing them to a hyphen.
+var nonAlnumRe = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+var validNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func isValidNamePart(s string) bool {
+	if len(s) == 0 || len(s) > maxFilenameLen {
+		return false
+	}
+	return validNameRe.MatchString(s)
+}
+
+func IsValidKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, p := range strings.Split(key, "/") {
+		if !isValidNamePart(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidKey(key string) bool { return IsValidKey(key) }
+
+// normalizeFilename sanitizes a secret name into a lowercase kebab-case file
+// base name: it lowercases, collapses non-alphanumeric runs to single hyphens,
+// trims edge hyphens, and caps the length so the resulting path stays portable.
+func normalizeFilename(name string) string {
+	s := strings.ToLower(name)
+	s = nonAlnumRe.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "secret"
+	}
+	if len(s) > maxFilenameLen {
+		s = s[:maxFilenameLen]
+		s = strings.Trim(s, "-")
+		if s == "" {
+			s = "secret"
+		}
+	}
+	return s
 }
 
 func (d *SecretManager) ParseRawValue(value string) (*Secret, error) {
@@ -67,9 +129,19 @@ func (d *SecretManager) ParseRawValue(value string) (*Secret, error) {
 		return nil, errors.New("invalid YAML: " + err.Error())
 	}
 
-	id, ok := data["__id"].(string)
-	if !ok || id == "" {
-		return nil, errors.New("invalid: missing or invalid '__id'")
+	name, _ := data["__name"].(string)
+	if name == "" {
+		// Fall back to __id when reindexing legacy files: use it as __name.
+		if id, _ := data["__id"].(string); id != "" {
+			name = id
+			data["__name"] = name
+		}
+	}
+	if name == "" {
+		return nil, errors.New("invalid: missing or invalid '__name'")
+	}
+	if !isValidKey(name) {
+		return nil, fmt.Errorf("invalid '__name' %q: each part must be a valid name", name)
 	}
 
 	payload := ""
@@ -122,13 +194,25 @@ func (d *SecretManager) FormatValue(value *Secret) (string, error) {
 	return output, nil
 }
 
-func (d *SecretManager) EncryptData(data string) (string, error) {
-	if len(d.UserConfig.Data.Recipients) == 0 {
+// storedFileData returns a copy of the secret's data as it should be written to
+// disk: only the secret's name is stored (not the full id path).
+func storedFileData(data map[string]any, fullID string) map[string]any {
+	fileData := make(map[string]any, len(data))
+	for k, v := range data {
+		fileData[k] = v
+	}
+	delete(fileData, "__id")
+	fileData["__name"] = filepath.Base(fullID)
+	return fileData
+}
+
+func (d *SecretManager) EncryptData(data string, recipients []string) (string, error) {
+	if len(recipients) == 0 {
 		return "", errors.New("no recipient is added")
 	}
 
 	args := []string{"-a"}
-	for _, recipient := range d.UserConfig.Data.Recipients {
+	for _, recipient := range recipients {
 		args = append(args, "-r", recipient)
 	}
 
@@ -164,10 +248,9 @@ func (d *SecretManager) DecryptData(data string) (string, error) {
 func (d *SecretManager) LoadValue(encrypted string) (*Secret, error) {
 	value, err := d.DecryptData(encrypted)
 	if err != nil {
-		return nil, errors.New("failed to decrypt data: " + err.Error())
+		return nil, err
 	}
-	dynamicEnvValue, err := d.ParseRawValue(value)
-	return dynamicEnvValue, err
+	return d.ParseRawValue(value)
 }
 
 func (d *SecretManager) ListSecretFiles(prefix string) ([]string, error) {
@@ -250,27 +333,87 @@ func (d *SecretManager) SaveIndex(index *map[string]string) error {
 		return err
 	}
 	d.index = index
-	encrypted, err := d.EncryptData(string(indexContent))
+	encrypted, err := d.EncryptData(string(indexContent), d.UserConfig.GetRecipientsForPath("."))
 	if err != nil {
 		return err
 	}
 	return d.Filehandler.WriteFile(d.Config.IndexFile, encrypted)
 }
-
 func (d *SecretManager) BuildIndex() error {
 	secrets := d.ListItems("")
-	index := make(map[string]string)
-	idCounts := make(map[string]int)
 
-	for uid, value := range secrets {
-		baseID := value.Data["__id"].(string)
-		idCounts[baseID]++
-		if idCounts[baseID] > 1 {
-			index[uid] = fmt.Sprintf("%s (%d)", baseID, idCounts[baseID]-1)
-		} else {
-			index[uid] = baseID
-		}
+	index := make(map[string]string)
+	used := make(map[string]bool)
+
+	uids := make([]string, 0, len(secrets))
+	for uid := range secrets {
+		uids = append(uids, uid)
 	}
+	sort.Strings(uids)
+
+	for _, uid := range uids {
+		value := secrets[uid]
+		rawName := rawNameOf(value.Data)
+		_, hasLegacyID := value.Data["__id"]
+		hasSlash := strings.Contains(rawName, "/")
+		fullID := d.fullIDFromUID(uid, rawName)
+		name := rawName
+		dir := filepath.Dir(fullID)
+
+		var targetUID string
+		obscure := d.UserConfig.GetObscureNamesForPath(dir)
+		if obscure {
+			// Keep nanoid-style filenames as-is; migrate readable ones to a nanoid.
+			if !isReadableFilename(uid, name) {
+				targetUID = uid
+			} else {
+			nid, err := newNanoid()
+			if err != nil {
+				return errors.New("failed to generate ID: " + err.Error())
+			}
+			targetUID = filepath.Join(dir, nid)
+			}
+		} else {
+			// Reuse an existing readable filename; otherwise assign a unique one.
+			if isReadableFilename(uid, name) && !used[uid] {
+				targetUID = uid
+			} else {
+				base := normalizeFilename(filepath.Base(name))
+				targetUID = filepath.Join(dir, base)
+				for i := 2; used[targetUID]; i++ {
+					targetUID = filepath.Join(dir, fmt.Sprintf("%s.%d", base, i))
+				}
+			}
+		}
+
+		used[targetUID] = true
+
+		needsRewrite := hasLegacyID || hasSlash
+		if targetUID != uid {
+			if err := d.Filehandler.MoveFile(d.GetSecretPath(uid), d.GetSecretPath(targetUID)); err != nil {
+				if d.Config.Debug {
+					log.Printf("Error migrating %s: %v\n", uid, err)
+				}
+				targetUID = uid
+			} else {
+				needsRewrite = true
+			}
+		}
+
+		if needsRewrite {
+			// Rewrite content to ensure __name is relative and __id is removed.
+			data, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
+			if err == nil {
+				recipients := d.UserConfig.GetRecipientsForPath(filepath.Dir(fullID))
+				if enc, e := d.EncryptData(data, recipients); e == nil {
+					_ = d.Filehandler.WriteFile(d.GetSecretPath(targetUID), enc)
+				}
+			}
+		}
+
+		index[targetUID] = fullID
+	}
+
 	return d.SaveIndex(&index)
 }
 
@@ -300,11 +443,16 @@ func (d *SecretManager) GetOrCreateSecretUID(key string) (string, error) {
 		return uid, nil
 	}
 
-	nid, err := gonanoid.New()
-	if err != nil {
-		return "", errors.New("failed to generate ID: " + err.Error())
+	if d.UserConfig.GetObscureNamesForPath(filepath.Dir(key)) {
+		nid, err := newNanoid()
+		if err != nil {
+			return "", errors.New("failed to generate ID: " + err.Error())
+		}
+		return filepath.Join(filepath.Dir(key), nid), nil
 	}
-	return nid, nil
+
+	index := d.LoadIndex()
+	return d.uniqueReadableUID(key, index, ""), nil
 }
 
 func (d *SecretManager) GetSecretPath(uid string) string {
@@ -323,7 +471,62 @@ func (d *SecretManager) GetSecret(key string) (*Secret, error) {
 		return nil, err
 	}
 	dynamicEnvValue, err := d.LoadValue(data)
+	if err != nil {
+		return nil, err
+	}
 	return dynamicEnvValue, err
+}
+
+// fullIDFromUID reconstructs the full id from a file's location (uid, relative
+// to the data dir) and the name stored inside it.
+func (d *SecretManager) fullIDFromUID(uid string, name string) string {
+	return filepath.Join(filepath.Dir(uid), name)
+}
+
+// rawNameOf returns the stored name of a secret from its __name field.
+func rawNameOf(data map[string]any) string {
+	if n, ok := data["__name"].(string); ok {
+		return n
+	}
+	return ""
+}
+
+// isReadableFilename reports whether a secret's on-disk uid is already a
+// readable (name-based) filename for the given secret name, i.e. either the
+// normalized name or the normalized name with a ".N" uniqueness suffix.
+// name is the relative __name and may contain "/" for sub-paths.
+func isReadableFilename(uid string, name string) bool {
+	norm := normalizeFilename(filepath.Base(name))
+	base := filepath.Base(uid)
+	if base == norm {
+		return true
+	}
+	if strings.HasPrefix(base, norm+".") {
+		suffix := strings.TrimPrefix(base, norm+".")
+		if n, err := strconv.Atoi(suffix); err == nil && n >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// uniqueReadableUID returns a unique uid for a secret in readable mode, derived
+// from its name. It prefers a name with a ".N" suffix to avoid colliding with
+// uids already present in the index, excluding excludeUID (the file being
+// moved).
+func (d *SecretManager) uniqueReadableUID(fullID string, index *map[string]string, excludeUID string) string {
+	dir := filepath.Dir(fullID)
+	base := normalizeFilename(filepath.Base(fullID))
+	candidate := filepath.Join(dir, base)
+	for i := 2; ; i++ {
+		if candidate != excludeUID {
+			if _, exists := (*index)[candidate]; !exists {
+				break
+			}
+		}
+		candidate = filepath.Join(dir, fmt.Sprintf("%s.%d", base, i))
+	}
+	return candidate
 }
 
 func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
@@ -331,14 +534,29 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 		return errors.New("value is nil")
 	}
 
-	newID := value.Data["__id"].(string)
+	rawName, _ := value.Data["__name"].(string)
+	if rawName == "" {
+		return errors.New("invalid: missing or invalid '__name'")
+	}
+	if !isValidKey(rawName) {
+		return fmt.Errorf("invalid '__name' %q: each part must be a valid name", rawName)
+	}
+	if !isValidKey(oldID) {
+		return fmt.Errorf("invalid id %q: each part must be a valid name", oldID)
+	}
+	// __name is always the relative name (may contain "/" for sub-paths);
+	// it is mirrored to directories relative to the old id's directory.
+	fullID := filepath.Clean(filepath.Join(filepath.Dir(oldID), rawName))
+	if !isValidKey(fullID) {
+		return fmt.Errorf("invalid id %q: each part must be a valid name", fullID)
+	}
 
-	if oldID != newID {
+	if oldID != fullID {
 		// Renaming: check if target key already exists
 		index := d.LoadIndex()
 		for _, id := range *index {
-			if id == newID {
-				return fmt.Errorf("secret %q already exists", newID)
+			if id == fullID {
+				return fmt.Errorf("secret %q already exists", fullID)
 			}
 		}
 	}
@@ -348,22 +566,47 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 		return err
 	}
 
-	data, err := d.FormatValue(value)
+	// Place the file under dirname(fullID), keeping the nanoid in obscure mode
+	// or using a unique name-based filename otherwise.
+	var targetUID string
+	if d.UserConfig.GetObscureNamesForPath(filepath.Dir(fullID)) {
+		targetUID = filepath.Join(filepath.Dir(fullID), filepath.Base(uid))
+	} else if oldID == fullID {
+		// Updating an existing secret: keep its current uid.
+		targetUID = uid
+	} else {
+		// Renaming (or a new secret whose name collides): derive a unique uid,
+		// excluding the file currently being replaced.
+		index := d.LoadIndex()
+		targetUID = d.uniqueReadableUID(fullID, index, uid)
+	}
+
+	// Store only the name inside the file, not the full path.
+	data, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
 	if err != nil {
 		return err
 	}
 
-	encrypted, err := d.EncryptData(data)
+	recipients := d.UserConfig.GetRecipientsForPath(filepath.Dir(fullID))
+	encrypted, err := d.EncryptData(data, recipients)
 	if err != nil {
 		return err
 	}
 
-	path := d.GetSecretPath(uid)
-	if err := d.Filehandler.WriteFile(path, encrypted); err != nil {
+	if err := d.Filehandler.WriteFile(d.GetSecretPath(targetUID), encrypted); err != nil {
 		return err
 	}
 
-	return d.UpdateIndex(uid, newID, oldID)
+	if targetUID != uid {
+		if err := d.Filehandler.DeleteFile(d.GetSecretPath(uid)); err != nil {
+			return err
+		}
+	}
+
+	index := d.LoadIndex()
+	delete(*index, uid)
+	(*index)[targetUID] = fullID
+	return d.SaveIndex(d.index)
 }
 
 func (d *SecretManager) DeleteSecret(key string) error {
@@ -454,9 +697,10 @@ func (d *SecretManager) VerifyIdentities() error {
 	}
 
 	identities := strings.Split(strings.TrimSpace(string(output)), "\n")
+	recipients := d.UserConfig.GetRecipientsForPath(".")
 
 	for _, identity := range identities {
-		for _, recipient := range d.UserConfig.Data.Recipients {
+		for _, recipient := range recipients {
 			if identity == recipient {
 				return nil
 			}
@@ -473,8 +717,9 @@ func (d *SecretManager) ReencryptAll() error {
 	}
 
 	secrets := d.ListItems("")
-	for _, value := range secrets {
-		d.SetSecret(value.Data["__id"].(string), value)
+	for uid, value := range secrets {
+		fullID := d.fullIDFromUID(uid, rawNameOf(value.Data))
+		d.SetSecret(fullID, value)
 	}
 	return nil
 }
@@ -484,16 +729,17 @@ func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, erro
 	secrets := d.ListItems(prefix)
 	fmt.Println("Loaded", len(secrets), "files")
 	keys := make([]string, 0, len(secrets))
-	for _, value := range secrets {
-		key := value.Data["__id"].(string)
-		keys = append(keys, key)
-		path, err := filepath.Rel(prefix, key)
+	for uid, value := range secrets {
+		fullID := d.fullIDFromUID(uid, value.Data["__name"].(string))
+		keys = append(keys, fullID)
+		path, err := filepath.Rel(prefix, fullID)
 		path = strings.ReplaceAll(path, "\\", "/")
 		if err != nil || strings.HasPrefix(path, "..") {
 			return nil, fmt.Errorf("failed to get relative path: %w", err)
 		}
 
-		output, err := d.FormatValue(value)
+		// Export stores only the name; the path is implied by the file location.
+		output, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
 		if err != nil {
 			return nil, fmt.Errorf("failed to format value: %w", err)
 		}
@@ -524,10 +770,14 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 		secret, err := d.ParseRawValue(value)
 		if err != nil {
 			secret = &Secret{
-				Data: map[string]any{"__id": file},
+				Data: map[string]any{"__name": filepath.Base(file)},
 			}
 			if err := yaml.Unmarshal([]byte(value), &secret.Data); err != nil {
 				return nil, fmt.Errorf("failed to parse file: %w", err)
+			}
+			// Ensure __name stays relative (basename).
+			if n, ok := secret.Data["__name"].(string); ok {
+				secret.Data["__name"] = filepath.Base(n)
 			}
 		}
 
@@ -537,8 +787,11 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 			continue
 		}
 
-		id := secret.Data["__id"].(string)
+		id := strings.ReplaceAll(file, "\\", "/")
+		id = strings.TrimSuffix(id, d.Config.EnvSuffix)
 		sanitizedID := d.SanitizeID(id)
+		// __name is the relative name (basename); the full id is sanitizedID.
+		secret.Data["__name"] = filepath.Base(sanitizedID)
 
 		existing, err := d.GetSecret(sanitizedID)
 		if err == nil {

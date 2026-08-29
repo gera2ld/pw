@@ -49,9 +49,9 @@ pw rcp add age1...
 
 # Create a secret
 pw edit my-api
-# Opens editor with default __id: my-api
+# Opens editor with default __name: my-api
 # Add your secrets:
-# __id: my-api
+# __name: my-api
 # _base_url: https://api.example.com
 # API_KEY: secret123
 # ENDPOINT: '{{._base_url}}/v1'
@@ -74,16 +74,21 @@ pw show my-api
 Secrets are YAML files with optional raw payload:
 
 ```yaml
-__id: my-secret
+__name: password
 _key: local-only (not exported)
 SECRET_KEY: value
 ---
 <Optional raw payload: SSH keys, certificates, etc.>
 ```
 
+`__name` is the secret's relative name (the final segment). The full id
+(`folder/subfolder/name`) determines where the file lives on disk — the directory is
+mirrored as plaintext folders and only the leaf `.age` file is encrypted. The full id is
+reconstructed from the file's location + `__name`.
+
 ### Naming Conventions
 
-- `__xxx` (Internal): Reserved for tool metadata (e.g., `__id`). Not injected.
+- `__xxx` (Internal): Reserved for tool metadata (e.g., `__name`). Not injected.
 - `_xxx` (Local): Private variables for expansion (use `{{._xxx}}` to reference), not injected.
 - `xxx` (Export): Standard environment variables, injected during `run`.
 
@@ -91,7 +96,7 @@ SECRET_KEY: value
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
-| `ls` | `pw ls` | List all indexed `__id`s |
+| `ls` | `pw ls` | List all indexed secret ids |
 | `show` | `pw show <id>` | Decrypt and print full content |
 | `edit` | `pw edit <id>` | Edit via `$EDITOR` |
 | `run` | `pw run <id1> <id2> -- <cmd>` | Inject merged secrets and execute |
@@ -108,17 +113,67 @@ Default locations (can be overridden with env vars):
 
 - `PW_ROOT`: Vault root (default: `~/.config/pw`)
 - `PW_IDENTITIES`: Age identity file (default: `$PW_ROOT/identities`)
+- `PW_DATA_DIR`: Directory where secrets are stored (default: `vault`, resolved relative to `$PW_ROOT` unless an absolute path is given)
 - `PW_DEBUG`: Enable debug logging
+
+Recipients (age public keys) are configured in `.pw.yml` files. A `.pw.yml` at
+`$PW_ROOT` acts as the global default, and any `.pw.yml` inside the data directory
+overrides it for its folder and all subfolders (child replaces parent list).
+
+```bash
+# Add a recipient globally (writes to $PW_ROOT/.pw.yml)
+pw rcp add age1...
+```
+
+You can also drop a `.pw.yml` next to your secrets to scope recipients per folder:
+
+```
+$PW_DATA_DIR/db/.pw.yml   # recipients: [age1...]  (applies to db/ and below)
+```
+
+By default each secret's file is named after its readable, lowercased, kebab-case
+basename and a unique counter suffix is appended on collision (e.g.
+`db/prod/password.age`, `db/prod/password.2.age`). Set `obscure_names: true` in a
+`.pw.yml` to instead store files under random lowercase nanoids
+(`db/prod/<nanoid>.age`):
+
+```yaml
+obscure_names: true
+```
+
+The on-disk naming is a cosmetic choice — lookups always go through the encrypted
+index, so `pw reindex` will move files between the two layouts to match the current
+`obscure_names` setting.
 
 ## Storage
 
 Default `~/.config/pw/`:
 ```
 ~/.config/pw/
-├── vault/
-│   ├── index.dat.age    # Encrypted index mapping nanoids to IDs
-│   └── <nanoid>.age      # Individual secret files
-└── identities          # Age private key
+├── .pw.yml              # Global recipient config
+├── identities           # Age private key
+└── vault/               # $PW_DATA_DIR (default)
+    ├── .pw.yml          # Optional per-folder recipient config
+    ├── index.dat.age    # Encrypted index mapping file paths to IDs
+    ├── password.age      # Top-level secret (readable name, default)
+    └── db/
+        └── prod/
+            └── password.age  # Mirrored from id "db/prod/password"
+```
+
+With `obscure_names: true` the leaf files use random nanoids instead
+(`db/prod/<nanoid>.age`). Secret ids may contain `/` to organize secrets into folders.
+The full id path is mirrored on disk (directories are kept as plaintext; only the leaf
+`.age` file is encrypted). The index (`index.dat.age`) is a single encrypted file at the
+root of the data directory.
+
+### Migrating existing data
+
+`pw reindex` rebuilds `index.dat.age` and, when the `obscure_names` setting changes,
+physically moves files between the readable and obscured layouts:
+
+```bash
+pw reindex
 ```
 
 All data is encrypted with `age` and Git-friendly.
