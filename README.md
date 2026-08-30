@@ -164,7 +164,9 @@ Commands that take an `<id>` accept the following forms:
   within a single path segment and **never crosses `/`** (so `server/*` matches
   `/server/x` but not `/server/x/y`, and `git*/*` matches `/gitlab/foo`). A
   leading `/` anchors the pattern at the root and may still carry wildcards
-  (e.g. `/server/*`).
+  (e.g. `/server/*`). The `**` segment matches **any number of path segments**,
+  spanning across `/` — so `server/**` matches `/server/x`, `/server/x/y`, and
+  any deeper descendant.
 
 Single-target commands (`show`, `edit`, `mv`, `run`) throw if a lookup matches
 zero or more than one secret. Bulk commands that accept filters (`rm`,

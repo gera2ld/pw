@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -875,24 +876,59 @@ func ContainsGlob(s string) bool {
 }
 
 // matchID reports whether fullID matches the filter. A filter containing glob
-// metacharacters ("*", "?", "[") is treated as a glob, where "*" matches within
-// a single path segment and never crosses a "/". A leading "/" anchors the
-// pattern at the root and may still carry wildcards. Without glob characters, a
-// leading "/" requires an exact match, and a bare filter is a fuzzy subsequence
-// match.
+// metacharacters ("*", "?", "[") is treated as a glob. Within a single path
+// segment, "*" matches any run of characters and never crosses a "/"; the "**"
+// segment matches zero or more path segments, so it can span across "/"
+// (e.g. "x/**" matches /x, /x/y and /x/y/z). A leading "/" anchors the pattern
+// at the root and may still carry wildcards. Without glob characters, a leading
+// "/" requires an exact match, and a bare filter is a fuzzy subsequence match.
 func matchID(filter, fullID string) bool {
 	if ContainsGlob(filter) {
-		matchStr := fullID
-		if !strings.HasPrefix(filter, "/") {
-			matchStr = strings.TrimPrefix(fullID, "/")
-		}
-		ok, err := filepath.Match(filter, matchStr)
-		return err == nil && ok
+		pat := strings.TrimPrefix(filter, "/")
+		matchStr := strings.TrimPrefix(fullID, "/")
+		return globMatch(pat, matchStr)
 	}
 	if strings.HasPrefix(filter, "/") {
 		return fullID == CanonicalID(filter)
 	}
 	return fuzzyFullIDMatches(filter, fullID)
+}
+
+// globMatch reports whether path (a secret id without a leading "/") matches the
+// glob pattern (also without a leading "/"). It uses path.Match per segment
+// and treats a "**" segment as matching zero or more remaining segments.
+func globMatch(pattern, path string) bool {
+	return globMatchSegs(splitPath(pattern), splitPath(path))
+}
+
+func splitPath(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "/")
+}
+
+func globMatchSegs(pat, path []string) bool {
+	if len(pat) == 0 {
+		return len(path) == 0
+	}
+	if pat[0] == "**" {
+		// "**" matches zero or more remaining segments.
+		for i := 0; i <= len(path); i++ {
+			if globMatchSegs(pat[1:], path[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(path) == 0 {
+		return false
+	}
+	ok, err := pathpkg.Match(pat[0], path[0])
+	if err != nil || !ok {
+		return false
+	}
+	return globMatchSegs(pat[1:], path[1:])
 }
 
 // ReencryptAll re-encrypts secrets with the current per-folder recipients. With

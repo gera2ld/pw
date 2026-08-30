@@ -495,6 +495,30 @@ func TestResolveKeys(t *testing.T) {
 	if _, err := d2.ResolveKeys("*"); err == nil {
 		t.Error("ResolveKeys(*) expected error (no depth-1 secrets)")
 	}
+
+	// "**" matches any number of path segments (descendants at any depth).
+	index3 := &map[string]string{
+		"a/b/c": "/a/b/c",
+		"a/b/x": "/a/b/x",
+		"a/y":   "/a/y",
+		"z":     "/z",
+	}
+	d3 := &SecretManager{index: index3}
+	// "a/**" matches all descendants of a (and the a branch itself).
+	got, err = d3.ResolveKeys("a/**")
+	if err != nil || !reflect.DeepEqual(got, []string{"/a/b/c", "/a/b/x", "/a/y"}) {
+		t.Errorf("ResolveKeys(a/**) = %v, %v", got, err)
+	}
+	// Rooted "/**" matches everything.
+	got, err = d3.ResolveKeys("/**")
+	if err != nil || !reflect.DeepEqual(got, []string{"/a/b/c", "/a/b/x", "/a/y", "/z"}) {
+		t.Errorf("ResolveKeys(/**) = %v, %v", got, err)
+	}
+	// "a/*" still matches only direct children of a (here /a/y; a/b is not a leaf).
+	got, err = d3.ResolveKeys("a/*")
+	if err != nil || !reflect.DeepEqual(got, []string{"/a/y"}) {
+		t.Errorf("ResolveKeys(a/*) = %v, %v", got, err)
+	}
 }
 
 func TestResolveFilterKeys(t *testing.T) {
@@ -535,6 +559,16 @@ func TestResolveFilterKeys(t *testing.T) {
 	want = []string{"/gitlab/foo", "/server/web"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ResolveFilterKeys glob = %v, want %v", got, want)
+	}
+
+	// "**" glob together with another filter (union + dedupe).
+	got, err = d2.ResolveFilterKeys("**", "server/*")
+	if err != nil {
+		t.Fatalf("ResolveFilterKeys **: %v", err)
+	}
+	want = []string{"/db/prod/password", "/gitlab/foo", "/server/db/password", "/server/web"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ResolveFilterKeys ** = %v, want %v", got, want)
 	}
 }
 
