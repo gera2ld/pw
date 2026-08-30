@@ -194,6 +194,29 @@ func TestParseSecret(t *testing.T) {
 	}
 }
 
+func TestResolveVariables(t *testing.T) {
+	local := map[string]string{"_base": "https://x.io", "_empty": ""}
+	cases := []struct{ value, want string }{
+		{"$_base/x", "https://x.io/x"},
+		{"${_base}/x", "https://x.io/x"},
+		{"a$_base-b", "ahttps://x.io-b"},
+		{"{{._base}}/v1", "https://x.io/v1"},
+		{"{{._missing}}", ""},
+		{"$_empty", ""},
+		{"$HOME", "$HOME"},
+		{"p@ss$word!", "p@ss$word!"},
+		{"$", "$"},
+		{"$$", "$$"},
+		{"$1", "$1"},
+		{"${_base}}", "https://x.io}"},
+	}
+	for _, c := range cases {
+		if got := resolveVariables(c.value, local); got != c.want {
+			t.Errorf("resolveVariables(%q) = %q, want %q", c.value, got, c.want)
+		}
+	}
+}
+
 func TestValidateTemplates(t *testing.T) {
 	d := &SecretManager{}
 

@@ -6,7 +6,7 @@ pw is a local-first, cross-platform, and Git-friendly secret manager.
 
 - **Metadata privacy**: Randomized filenames (nanoids) prevent metadata leakage in cloud backups
 - **Per-entry Git granularity**: Each secret is a standalone encrypted file
-- **Variable expansion**: Supports `{{._var}}` substitution for local variables
+- **Variable expansion**: Local variables can be referenced as `$var`, `${var}`, or `{{._var}}`
 - **Zero-leakage**: Plaintext never hits the disk (piped through memory)
 
 ## Prerequisites
@@ -55,7 +55,7 @@ pw edit my-api
 # __name: my-api
 # _base_url: https://api.example.com
 # API_KEY: secret123
-# ENDPOINT: '{{._base_url}}/v1'
+# ENDPOINT: '$_base_url/v1'
 
 # Run command with secrets injected
 pw run my-api -- env
@@ -90,7 +90,7 @@ reconstructed from the file's location + `__name`.
 ### Naming Conventions
 
 - `__xxx` (Internal): Reserved for tool metadata (e.g., `__name`). Not injected.
-- `_xxx` (Local): Private variables for expansion (use `{{._xxx}}` to reference), not injected.
+- `_xxx` (Local): Private variables for expansion (reference as `$_xxx`, `${_xxx}`, or `{{._xxx}}`), not injected.
 - `xxx` (Export): Standard environment variables, injected during `run`.
 
 ## Usage
@@ -100,6 +100,7 @@ reconstructed from the file's location + `__name`.
 | `ls` | `pw ls` | List all indexed secret ids |
 | `show` | `pw show <id>` | Decrypt and print full content |
 | `edit` | `pw edit <id>` | Edit via `$EDITOR` |
+| `get` | `pw get <id> <key>` | Print a single env var value exactly, or error if missing |
 | `run` | `pw run <id1> <id2> -- <cmd>` | Inject merged secrets and execute |
 | `mv` | `pw mv <id> <new_id>` | Rename a secret (`--dry-run` shows the move) |
 | `rm` | `pw rm [filters...]` | Delete secrets; fuzzy multi-match filters allowed (`--dry-run` lists without deleting) |

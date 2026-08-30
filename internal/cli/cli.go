@@ -48,6 +48,7 @@ func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *
 	cmd.AddCommand(newReencryptCommand(sm))
 	cmd.AddCommand(newShowCommand(sm))
 	cmd.AddCommand(newEnvCommand(sm))
+	cmd.AddCommand(newGetCommand(sm))
 	if update.Repo != "" {
 		cmd.AddCommand(newUpdateCommand(version))
 	}
@@ -530,6 +531,33 @@ func newEnvCommand(sm *secrets.SecretManager) *cobra.Command {
 	}
 
 	return cmd
+}
+
+func newGetCommand(sm *secrets.SecretManager) *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <id> <key>",
+		Short: "Print a single environment variable value",
+		Long: `Resolve <id> (fuzzy/glob lookup, errors on ambiguity) and print the exact
+value of environment variable <key> without anything else. Errors if the key
+is missing.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fullID, err := resolveKey(sm, args[0])
+			if err != nil {
+				return err
+			}
+			vars, err := sm.ParseSecret(fullID)
+			if err != nil {
+				return fmt.Errorf("failed to parse secret %q: %w", args[0], err)
+			}
+			value, ok := vars.Env[args[1]]
+			if !ok {
+				return fmt.Errorf("key %q not found in %q", args[1], fullID)
+			}
+			fmt.Println(value)
+			return nil
+		},
+	}
 }
 
 func newUpdateCommand(currentVersion string) *cobra.Command {

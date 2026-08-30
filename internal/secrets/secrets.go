@@ -782,6 +782,13 @@ func (d *SecretManager) ParseSecret(key string) (*Vars, error) {
 	return &result, nil
 }
 
+// varRefRe matches shell-style "$NAME" or "${NAME}" references.
+var varRefRe = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))`)
+
+// resolveVariables expands variable references in value using the provided
+// local variables. Both the template syntax "{{._name}}" and the shell-like
+// syntax "$name" / "${name}" are supported; unknown "$" references are left
+// untouched so values like "$HOME" pass through unchanged.
 func resolveVariables(value string, local map[string]string) string {
 	tmpl := template.New("").
 		Option("missingkey=zero")
@@ -793,7 +800,17 @@ func resolveVariables(value string, local map[string]string) string {
 	if err := tmpl.Execute(&sb, local); err != nil {
 		return value
 	}
-	return sb.String()
+	return varRefRe.ReplaceAllStringFunc(sb.String(), func(ref string) string {
+		m := varRefRe.FindStringSubmatch(ref)
+		name := m[1]
+		if name == "" {
+			name = m[2]
+		}
+		if v, ok := local[name]; ok {
+			return v
+		}
+		return ref
+	})
 }
 
 func (d *SecretManager) GetSecrets(keys []string) map[string]string {
