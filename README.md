@@ -101,10 +101,10 @@ reconstructed from the file's location + `__name`.
 | `show` | `pw show <id>` | Decrypt and print full content |
 | `edit` | `pw edit <id>` | Edit via `$EDITOR` |
 | `run` | `pw run <id1> <id2> -- <cmd>` | Inject merged secrets and execute |
-| `mv` | `pw mv <id> <new_id>` | Rename a secret |
-| `rm` | `pw rm <id>` | Delete a secret |
+| `mv` | `pw mv <id> <new_id>` | Rename a secret (`--dry-run` shows the move) |
+| `rm` | `pw rm [filters...]` | Delete secrets; fuzzy multi-match filters allowed (`--dry-run` lists without deleting) |
 | `reindex` | `pw reindex` | Rebuild index |
-| `reencrypt` | `pw reencrypt` | Re-encrypt all secrets with the current per-folder recipients |
+| `reencrypt` | `pw reencrypt [filters...]` | Re-encrypt secrets with the current per-folder recipients (`--dry-run` lists matches without writing) |
 | `import` | `pw import <dir>` | Import secrets (with `--conflict` option) |
 | `export` | `pw export` | Export to `vault-export/` |
 

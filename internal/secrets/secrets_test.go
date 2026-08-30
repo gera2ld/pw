@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -398,7 +399,7 @@ func TestReencryptAll(t *testing.T) {
 		t.Fatalf("SetSecret: %v", err)
 	}
 
-	if err := sm.ReencryptAll(); err != nil {
+	if _, err := sm.ReencryptAll(); err != nil {
 		t.Fatalf("ReencryptAll: %v", err)
 	}
 
@@ -428,5 +429,180 @@ func TestReencryptAll(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "secret123") {
 		t.Fatalf("decrypted content missing secret: %s", out)
+	}
+}
+
+func TestResolveKeys(t *testing.T) {
+	index := &map[string]string{
+		"db/prod/password": "/db/prod/password",
+		"x/a/y/b":          "/x/a/y/b",
+		"db/z/b":           "/db/z/b",
+	}
+	d := &SecretManager{index: index}
+
+	// Exact match with leading "/".
+	got, err := d.ResolveKeys("/db/prod/password")
+	if err != nil || !reflect.DeepEqual(got, []string{"/db/prod/password"}) {
+		t.Errorf("ResolveKeys(/db/prod/password) = %v, %v", got, err)
+	}
+
+	// Exact miss with leading "/" -> not found.
+	if _, err := d.ResolveKeys("/db/prod/missing"); err == nil {
+		t.Error("ResolveKeys(/db/prod/missing) expected error")
+	}
+
+	// Fuzzy single match.
+	got, err = d.ResolveKeys("password")
+	if err != nil || !reflect.DeepEqual(got, []string{"/db/prod/password"}) {
+		t.Errorf("ResolveKeys(password) = %v, %v", got, err)
+	}
+
+	// Fuzzy ambiguous is allowed: returns both matches sorted.
+	got, err = d.ResolveKeys("b")
+	if err != nil || !reflect.DeepEqual(got, []string{"/db/z/b", "/x/a/y/b"}) {
+		t.Errorf("ResolveKeys(b) = %v, %v", got, err)
+	}
+
+	// No match.
+	if _, err := d.ResolveKeys("nope"); err == nil {
+		t.Error("ResolveKeys(nope) expected error")
+	}
+}
+
+func TestResolveFilterKeys(t *testing.T) {
+	index := &map[string]string{
+		"db/prod/password": "/db/prod/password",
+		"x/a/y/b":          "/x/a/y/b",
+		"db/z/b":           "/db/z/b",
+	}
+	d := &SecretManager{index: index}
+
+	// Union of two filters, deduped and sorted. "password" matches 1 key,
+	// "b" matches 2 (one of which overlaps with the exact "/db/prod/password").
+	got, err := d.ResolveFilterKeys("password", "b", "/db/prod/password")
+	if err != nil {
+		t.Fatalf("ResolveFilterKeys: %v", err)
+	}
+	want := []string{"/db/prod/password", "/db/z/b", "/x/a/y/b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ResolveFilterKeys = %v, want %v", got, want)
+	}
+
+	// A filter matching nothing is an error.
+	if _, err := d.ResolveFilterKeys("nope"); err == nil {
+		t.Error("ResolveFilterKeys(nope) expected error")
+	}
+}
+
+func TestReencryptAllFiltered(t *testing.T) {
+	if _, err := exec.LookPath("age"); err != nil {
+		t.Skip("age not available; skipping reencrypt filter test")
+	}
+	if _, err := exec.LookPath("age-keygen"); err != nil {
+		t.Skip("age-keygen not available; skipping reencrypt filter test")
+	}
+
+	root := t.TempDir()
+	id1 := filepath.Join(root, "id1")
+	id2 := filepath.Join(root, "id2")
+
+	genKey := func(path string) string {
+		if out, err := exec.Command("age-keygen", "-o", path).CombinedOutput(); err != nil {
+			t.Fatalf("age-keygen: %v: %s", err, out)
+		}
+		out, err := exec.Command("age-keygen", "-y", path).Output()
+		if err != nil {
+			t.Fatalf("age-keygen -y: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	pub1 := genKey(id1)
+	pub2 := genKey(id2)
+
+	// Global recipients: only id1 initially.
+	if err := os.WriteFile(filepath.Join(root, ".pw.yml"), []byte("recipients:\n  - "+pub1+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.ConfigType{
+		RootDir:    root,
+		Identities: id1,
+		DataDir:    filepath.Join(root, "vault"),
+		EnvSuffix:  ".age",
+		IndexFile:  filepath.Join(root, "vault", "index.dat.age"),
+		ConfigFile: ".pw.yml",
+	}
+	fh := filehandler.NewFileHandler(root, false)
+	uc := config.NewUserConfig(cfg, fh)
+	sm := NewSecretManager(cfg, uc, fh)
+
+	dbVal := &Secret{Data: map[string]any{"__name": "password", "TOKEN": "dbpass"}}
+	otherVal := &Secret{Data: map[string]any{"__name": "password", "TOKEN": "otherpass"}}
+	if err := sm.SetSecret("/db/prod/password", dbVal); err != nil {
+		t.Fatalf("SetSecret db: %v", err)
+	}
+	if err := sm.SetSecret("/other/secret", otherVal); err != nil {
+		t.Fatalf("SetSecret other: %v", err)
+	}
+	dbUID, _ := sm.GetSecretUID("/db/prod/password")
+	otherUID, _ := sm.GetSecretUID("/other/secret")
+
+	canDecrypt := func(uid string) bool {
+		enc, err := fh.ReadFile(sm.GetSecretPath(uid))
+		if err != nil {
+			return false
+		}
+		cmd := exec.Command("age", "--decrypt", "-i", id2)
+		cmd.Stdin = strings.NewReader(enc)
+		return cmd.Run() == nil
+	}
+
+	// Before adding a per-folder recipient and re-encrypting, id2 can decrypt neither.
+	if canDecrypt(dbUID) || canDecrypt(otherUID) {
+		t.Fatal("id2 should not decrypt before re-encrypt")
+	}
+
+	// Dry-run must not mutate: list targets, still not decryptable.
+	targets, err := sm.ReencryptTargets("/db/prod/password")
+	if err != nil || !reflect.DeepEqual(targets, []string{"/db/prod/password"}) {
+		t.Fatalf("dry-run targets = %v, %v", targets, err)
+	}
+	if canDecrypt(dbUID) {
+		t.Fatal("dry-run mutated the file")
+	}
+
+	// A filter matching nothing is an error.
+	if _, err := sm.ReencryptTargets("/nope"); err == nil {
+		t.Fatal("expected not-found error for /nope")
+	}
+
+	// Add a per-folder recipient for db/ and re-encrypt only the matched secret.
+	// Rebuild the config/manager so the per-folder file is read fresh (a real
+	// `pw reencrypt` is a fresh process; the merged config is cached per process).
+	if err := os.MkdirAll(filepath.Join(root, "vault", "db"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "vault", "db", ".pw.yml"), []byte("recipients:\n  - "+pub2+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	uc = config.NewUserConfig(cfg, fh)
+	sm = NewSecretManager(cfg, uc, fh)
+	dbUID, _ = sm.GetSecretUID("/db/prod/password")
+	otherUID, _ = sm.GetSecretUID("/other/secret")
+
+	targets, err = sm.ReencryptAll("/db/prod/password")
+	if err != nil {
+		t.Fatalf("ReencryptAll filtered: %v", err)
+	}
+	if !reflect.DeepEqual(targets, []string{"/db/prod/password"}) {
+		t.Fatalf("filtered targets = %v, want [/db/prod/password]", targets)
+	}
+
+	// Matched secret is now decryptable by id2; the non-matched one is not.
+	if !canDecrypt(dbUID) {
+		t.Fatal("matched secret should be decryptable by id2 after re-encrypt")
+	}
+	if canDecrypt(otherUID) {
+		t.Fatal("non-matched secret must remain undecryptable by id2")
 	}
 }

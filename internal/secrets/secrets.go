@@ -392,11 +392,11 @@ func (d *SecretManager) BuildIndex() error {
 			if !isReadableFilename(uid, name) {
 				targetUID = uid
 			} else {
-			nid, err := newNanoid()
-			if err != nil {
-				return errors.New("failed to generate ID: " + err.Error())
-			}
-			targetUID = relFromFullID(filepath.Join(dir, nid))
+				nid, err := newNanoid()
+				if err != nil {
+					return errors.New("failed to generate ID: " + err.Error())
+				}
+				targetUID = relFromFullID(filepath.Join(dir, nid))
 			}
 		} else {
 			// Reuse an existing readable filename; otherwise assign a unique one.
@@ -488,17 +488,18 @@ func fuzzyFullIDMatches(query string, fullID string) bool {
 	return qi == len(q)-1
 }
 
-// ResolveKey resolves a key to a fullID. If key starts with "/" it must be an
-// exact match against an index value. Otherwise it is a fuzzy match (see
-// fuzzyFullIDMatches). Returns not-found error for 0 matches, or an ambiguous
-// error (containing the word "ambiguous") for multiple matches.
-func (d *SecretManager) ResolveKey(key string) (string, error) {
+// ResolveKeys resolves a key to the set of matching fullIDs. It follows the
+// same rules as ResolveKey but never errors on multiple matches; instead it
+// returns all of them. A leading "/" requires an exact match against an index
+// value; otherwise the key is treated as a fuzzy subsequence query. It returns
+// a not-found error when nothing matches.
+func (d *SecretManager) ResolveKeys(key string) ([]string, error) {
 	if strings.HasPrefix(key, "/") {
 		lookup := CanonicalID(key)
 		if _, err := d.GetSecretUID(lookup); err != nil {
-			return "", fmt.Errorf("secret %q not found", key)
+			return nil, fmt.Errorf("secret %q not found", key)
 		}
-		return lookup, nil
+		return []string{lookup}, nil
 	}
 	index := d.LoadIndex()
 	var matches []string
@@ -508,13 +509,47 @@ func (d *SecretManager) ResolveKey(key string) (string, error) {
 		}
 	}
 	if len(matches) == 0 {
-		return "", fmt.Errorf("secret %q not found", key)
+		return nil, fmt.Errorf("secret %q not found", key)
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
+// ResolveKey resolves a key to a fullID. If key starts with "/" it must be an
+// exact match against an index value. Otherwise it is a fuzzy match (see
+// fuzzyFullIDMatches). Returns not-found error for 0 matches, or an ambiguous
+// error (containing the word "ambiguous") for multiple matches.
+func (d *SecretManager) ResolveKey(key string) (string, error) {
+	matches, err := d.ResolveKeys(key)
+	if err != nil {
+		return "", err
 	}
 	if len(matches) > 1 {
-		sort.Strings(matches)
 		return "", fmt.Errorf("ambiguous key %q matches %d keys: %s", key, len(matches), strings.Join(matches, ", "))
 	}
 	return matches[0], nil
+}
+
+// ResolveFilterKeys resolves multiple filters (same rules as key lookup, but
+// allowing multiple results) into a sorted, deduped list of fullIDs. A filter
+// matching zero secrets is an error.
+func (d *SecretManager) ResolveFilterKeys(filters ...string) ([]string, error) {
+	seen := make(map[string]bool)
+	var out []string
+	for _, f := range filters {
+		ids, err := d.ResolveKeys(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (d *SecretManager) GetOrCreateSecretUID(key string) (string, error) {
@@ -796,18 +831,80 @@ func (d *SecretManager) VerifyIdentities() error {
 	return errors.New("no matching identity found in recipients")
 }
 
-func (d *SecretManager) ReencryptAll() error {
-	err := d.VerifyIdentities()
+// ReencryptTargets returns the sorted list of fullIDs that would be
+// re-encrypted for the given filters, without modifying any files. With no
+// filters it returns every secret. A filter matching zero secrets is an error.
+func (d *SecretManager) ReencryptTargets(filters ...string) ([]string, error) {
+	secrets := d.ListItems("")
+	matched := make(map[string]bool)
+	matchedCount := make(map[string]int)
+	for _, f := range filters {
+		matchedCount[f] = 0
+	}
+	for uid, value := range secrets {
+		fullID := d.fullIDFromUID(uid, rawNameOf(value.Data))
+		if len(filters) == 0 {
+			matched[fullID] = true
+			continue
+		}
+		for _, f := range filters {
+			if matchFilter(f, fullID) {
+				matched[fullID] = true
+				matchedCount[f]++
+			}
+		}
+	}
+	for _, f := range filters {
+		if matchedCount[f] == 0 {
+			return nil, fmt.Errorf("secret %q not found", f)
+		}
+	}
+	targets := make([]string, 0, len(matched))
+	for id := range matched {
+		targets = append(targets, id)
+	}
+	sort.Strings(targets)
+	return targets, nil
+}
+
+// matchFilter reports whether fullID matches the lookup rules for filter: a
+// leading "/" requires an exact match, otherwise a fuzzy subsequence match.
+func matchFilter(filter, fullID string) bool {
+	if strings.HasPrefix(filter, "/") {
+		return fullID == CanonicalID(filter)
+	}
+	return fuzzyFullIDMatches(filter, fullID)
+}
+
+// ReencryptAll re-encrypts secrets with the current per-folder recipients. With
+// no filters it re-encrypts everything; otherwise only the secrets matching the
+// filters (same rules as key lookup, but allowing multiple results) are
+// re-encrypted. It returns the fullIDs that were re-encrypted.
+func (d *SecretManager) ReencryptAll(filters ...string) ([]string, error) {
+	if err := d.VerifyIdentities(); err != nil {
+		return nil, err
+	}
+
+	targets, err := d.ReencryptTargets(filters...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	secrets := d.ListItems("")
+	targetSet := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		targetSet[t] = true
+	}
 	for uid, value := range secrets {
 		fullID := d.fullIDFromUID(uid, rawNameOf(value.Data))
-		d.SetSecret(fullID, value)
+		if !targetSet[fullID] {
+			continue
+		}
+		if err := d.SetSecret(fullID, value); err != nil {
+			return nil, err
+		}
 	}
-	return nil
+	return targets, nil
 }
 
 func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, error) {

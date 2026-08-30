@@ -109,18 +109,34 @@ Use -- to separate IDs from the command.`,
 }
 
 func newRmCommand(sm *secrets.SecretManager) *cobra.Command {
-	return &cobra.Command{
-		Use:   "rm <id>",
-		Short: "Delete the physical file and update index",
-		Args:  cobra.ExactArgs(1),
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "rm [filters...]",
+		Short: "Delete secrets (fuzzy multi-match filters allowed)",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fullID, err := resolveKey(sm, args[0])
+			ids, err := sm.ResolveFilterKeys(args...)
 			if err != nil {
 				return err
 			}
-			return sm.DeleteSecret(fullID)
+			if dryRun {
+				for _, id := range ids {
+					fmt.Println(id)
+				}
+				return nil
+			}
+			for _, id := range ids {
+				if err := sm.DeleteSecret(id); err != nil {
+					return err
+				}
+			}
+			fmt.Printf("Deleted %d secrets\n", len(ids))
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "List secrets that would be deleted without deleting them")
+	return cmd
 }
 
 func newImportCommand(sm *secrets.SecretManager) *cobra.Command {
@@ -195,7 +211,9 @@ func newLsCommand(sm *secrets.SecretManager) *cobra.Command {
 }
 
 func newMvCommand(sm *secrets.SecretManager) *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+
+	cmd := &cobra.Command{
 		Use:   "mv <id> <new_id>",
 		Short: "Rename a secret and refresh index",
 		Args:  cobra.ExactArgs(2),
@@ -227,12 +245,20 @@ func newMvCommand(sm *secrets.SecretManager) *cobra.Command {
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return fmt.Errorf("cannot move %q to %q: target is outside its directory", sourceFullID, newID)
 			}
+
+			if dryRun {
+				fmt.Printf("Would move %s -> %s\n", sourceFullID, targetFullID)
+				return nil
+			}
+
 			// __name is relative; store a path relative to the source's directory
 			// so SetSecret can mirror it correctly.
 			parsed.Data["__name"] = rel
 			return sm.SetSecret(sourceFullID, parsed)
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show the move that would happen without performing it")
+	return cmd
 }
 
 func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
@@ -351,17 +377,32 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 }
 
 func newReencryptCommand(sm *secrets.SecretManager) *cobra.Command {
-	return &cobra.Command{
-		Use:   "reencrypt",
-		Short: "Re-encrypt all secrets with the current per-folder recipients",
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "reencrypt [filters...]",
+		Short: "Re-encrypt secrets with the current per-folder recipients",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := sm.ReencryptAll(); err != nil {
+			if dryRun {
+				targets, err := sm.ReencryptTargets(args...)
+				if err != nil {
+					return err
+				}
+				for _, id := range targets {
+					fmt.Println(id)
+				}
+				return nil
+			}
+			targets, err := sm.ReencryptAll(args...)
+			if err != nil {
 				return err
 			}
-			fmt.Println("Re-encrypted all secrets")
+			fmt.Printf("Re-encrypted %d secrets\n", len(targets))
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "List secrets that would be re-encrypted without re-encrypting them")
+	return cmd
 }
 
 func newReindexCommand(sm *secrets.SecretManager) *cobra.Command {
