@@ -19,9 +19,11 @@ import (
 )
 
 // resolveKey validates id and resolves it to a fullID. Any resolution failure
-// (not-found or ambiguous) is returned as an error.
+// (not-found or ambiguous) is returned as an error. Glob filters (containing
+// "*", "?", "[") are not subject to the strict name validation, since they are
+// resolved by pattern rather than as literal key parts.
 func resolveKey(sm *secrets.SecretManager, id string) (string, error) {
-	if !secrets.IsValidKey(id) {
+	if !secrets.ContainsGlob(id) && !secrets.IsValidKey(id) {
 		return "", fmt.Errorf("invalid id %q: each part must be a valid name", id)
 	}
 	return sm.ResolveKey(id)
@@ -268,7 +270,7 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
-			if !secrets.IsValidKey(id) {
+			if !secrets.ContainsGlob(id) && !secrets.IsValidKey(id) {
 				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
 			}
 
@@ -277,17 +279,29 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				return errors.New("$EDITOR is not set")
 			}
 
-			// Absolute IDs are explicit targets — always allowed (create if new).
-			// Fuzzy IDs (no leading "/") must resolve to an existing secret.
-			isAbs := strings.HasPrefix(id, "/")
+			// Wildcard ids are resolved as a lookup and never create a new
+			// secret (throw if zero or multiple matches). Absolute ids without
+			// wildcards are explicit targets and may create a new secret when
+			// not found. Relative non-wildcard ids must resolve to an existing
+			// secret.
+			var isAbs bool
 			var sourceFullID string
-			if isAbs {
-				sourceFullID = secrets.CanonicalID(id)
-			} else {
+			if secrets.ContainsGlob(id) {
 				var err error
-				sourceFullID, err = resolveKey(sm, id)
+				sourceFullID, err = sm.ResolveKey(id)
 				if err != nil {
 					return err
+				}
+			} else {
+				isAbs = strings.HasPrefix(id, "/")
+				if isAbs {
+					sourceFullID = secrets.CanonicalID(id)
+				} else {
+					var err error
+					sourceFullID, err = resolveKey(sm, id)
+					if err != nil {
+						return err
+					}
 				}
 			}
 

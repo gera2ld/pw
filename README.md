@@ -152,6 +152,24 @@ The on-disk naming is a cosmetic choice — lookups always go through the encryp
 index, so `pw reindex` will move files between the two layouts to match the current
 `obscure_names` setting.
 
+## Key lookup
+
+Commands that take an `<id>` accept the following forms:
+
+- **Exact** — a leading `/` with no wildcards, e.g. `/db/prod/password`.
+- **Fuzzy** — without a leading `/`, treated as a subsequence query: the last
+  part must match the secret's basename exactly, and the remaining parts must
+  appear in order as ancestors (e.g. `prod/password`).
+- **Glob** — a filter containing `*`/`?`/`[` is a wildcard pattern. `*` matches
+  within a single path segment and **never crosses `/`** (so `server/*` matches
+  `/server/x` but not `/server/x/y`, and `git*/*` matches `/gitlab/foo`). A
+  leading `/` anchors the pattern at the root and may still carry wildcards
+  (e.g. `/server/*`).
+
+Single-target commands (`show`, `edit`, `mv`, `run`) throw if a lookup matches
+zero or more than one secret. Bulk commands that accept filters (`rm`,
+`reencrypt`) allow multiple matches and operate on all of them.
+
 ## Storage
 
 Default `~/.config/pw/`:

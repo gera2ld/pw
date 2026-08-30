@@ -467,6 +467,34 @@ func TestResolveKeys(t *testing.T) {
 	if _, err := d.ResolveKeys("nope"); err == nil {
 		t.Error("ResolveKeys(nope) expected error")
 	}
+
+	// Glob: "*" matches a single path segment only (never crosses "/").
+	index2 := &map[string]string{
+		"server/web":         "/server/web",
+		"server/db/password": "/server/db/password",
+		"gitlab/foo":         "/gitlab/foo",
+		"db/prod/password":   "/db/prod/password",
+	}
+	d2 := &SecretManager{index: index2}
+	// "server/*" matches exactly one segment under server/.
+	got, err = d2.ResolveKeys("server/*")
+	if err != nil || !reflect.DeepEqual(got, []string{"/server/web"}) {
+		t.Errorf("ResolveKeys(server/*) = %v, %v", got, err)
+	}
+	// "git*/*" matches "gitlab/foo" but not deeper/none.
+	got, err = d2.ResolveKeys("git*/*")
+	if err != nil || !reflect.DeepEqual(got, []string{"/gitlab/foo"}) {
+		t.Errorf("ResolveKeys(git*/*) = %v, %v", got, err)
+	}
+	// Rooted glob "/server/*" anchors at root.
+	got, err = d2.ResolveKeys("/server/*")
+	if err != nil || !reflect.DeepEqual(got, []string{"/server/web"}) {
+		t.Errorf("ResolveKeys(/server/*) = %v, %v", got, err)
+	}
+	// "*" alone matches only depth-1 ids (none here).
+	if _, err := d2.ResolveKeys("*"); err == nil {
+		t.Error("ResolveKeys(*) expected error (no depth-1 secrets)")
+	}
 }
 
 func TestResolveFilterKeys(t *testing.T) {
@@ -491,6 +519,22 @@ func TestResolveFilterKeys(t *testing.T) {
 	// A filter matching nothing is an error.
 	if _, err := d.ResolveFilterKeys("nope"); err == nil {
 		t.Error("ResolveFilterKeys(nope) expected error")
+	}
+
+	// Glob filters: union of "server/*" and "git*/*" across the index.
+	d2 := &SecretManager{index: &map[string]string{
+		"server/web":         "/server/web",
+		"server/db/password": "/server/db/password",
+		"gitlab/foo":         "/gitlab/foo",
+		"db/prod/password":   "/db/prod/password",
+	}}
+	got, err = d2.ResolveFilterKeys("server/*", "git*/*")
+	if err != nil {
+		t.Fatalf("ResolveFilterKeys glob: %v", err)
+	}
+	want = []string{"/gitlab/foo", "/server/web"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ResolveFilterKeys glob = %v, want %v", got, want)
 	}
 }
 

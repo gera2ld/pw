@@ -491,10 +491,12 @@ func fuzzyFullIDMatches(query string, fullID string) bool {
 // ResolveKeys resolves a key to the set of matching fullIDs. It follows the
 // same rules as ResolveKey but never errors on multiple matches; instead it
 // returns all of them. A leading "/" requires an exact match against an index
-// value; otherwise the key is treated as a fuzzy subsequence query. It returns
-// a not-found error when nothing matches.
+// value (unless it carries glob wildcards, in which case it is a rooted glob);
+// otherwise the key is a fuzzy subsequence query. A key may also use glob
+// wildcards ("*", "?", "["), where "*" matches within a single path segment and
+// never crosses "/". It returns a not-found error when nothing matches.
 func (d *SecretManager) ResolveKeys(key string) ([]string, error) {
-	if strings.HasPrefix(key, "/") {
+	if !ContainsGlob(key) && strings.HasPrefix(key, "/") {
 		lookup := CanonicalID(key)
 		if _, err := d.GetSecretUID(lookup); err != nil {
 			return nil, fmt.Errorf("secret %q not found", key)
@@ -504,7 +506,7 @@ func (d *SecretManager) ResolveKeys(key string) ([]string, error) {
 	index := d.LoadIndex()
 	var matches []string
 	for _, id := range *index {
-		if fuzzyFullIDMatches(key, id) {
+		if matchID(key, id) {
 			matches = append(matches, id)
 		}
 	}
@@ -531,8 +533,8 @@ func (d *SecretManager) ResolveKey(key string) (string, error) {
 }
 
 // ResolveFilterKeys resolves multiple filters (same rules as key lookup, but
-// allowing multiple results) into a sorted, deduped list of fullIDs. A filter
-// matching zero secrets is an error.
+// allowing multiple results, including glob wildcards) into a sorted, deduped
+// list of fullIDs. A filter matching zero secrets is an error.
 func (d *SecretManager) ResolveFilterKeys(filters ...string) ([]string, error) {
 	seen := make(map[string]bool)
 	var out []string
@@ -848,7 +850,7 @@ func (d *SecretManager) ReencryptTargets(filters ...string) ([]string, error) {
 			continue
 		}
 		for _, f := range filters {
-			if matchFilter(f, fullID) {
+			if matchID(f, fullID) {
 				matched[fullID] = true
 				matchedCount[f]++
 			}
@@ -867,9 +869,26 @@ func (d *SecretManager) ReencryptTargets(filters ...string) ([]string, error) {
 	return targets, nil
 }
 
-// matchFilter reports whether fullID matches the lookup rules for filter: a
-// leading "/" requires an exact match, otherwise a fuzzy subsequence match.
-func matchFilter(filter, fullID string) bool {
+// ContainsGlob reports whether s contains glob metacharacters.
+func ContainsGlob(s string) bool {
+	return strings.ContainsAny(s, "*?[")
+}
+
+// matchID reports whether fullID matches the filter. A filter containing glob
+// metacharacters ("*", "?", "[") is treated as a glob, where "*" matches within
+// a single path segment and never crosses a "/". A leading "/" anchors the
+// pattern at the root and may still carry wildcards. Without glob characters, a
+// leading "/" requires an exact match, and a bare filter is a fuzzy subsequence
+// match.
+func matchID(filter, fullID string) bool {
+	if ContainsGlob(filter) {
+		matchStr := fullID
+		if !strings.HasPrefix(filter, "/") {
+			matchStr = strings.TrimPrefix(fullID, "/")
+		}
+		ok, err := filepath.Match(filter, matchStr)
+		return err == nil && ok
+	}
 	if strings.HasPrefix(filter, "/") {
 		return fullID == CanonicalID(filter)
 	}
