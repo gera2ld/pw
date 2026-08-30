@@ -122,18 +122,23 @@ func newRmCommand(sm *secrets.SecretManager) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			verb := "Deleted"
 			if dryRun {
-				for _, id := range ids {
-					fmt.Println(id)
-				}
-				return nil
+				verb = "Would delete"
 			}
 			for _, id := range ids {
-				if err := sm.DeleteSecret(id); err != nil {
-					return err
+				if !dryRun {
+					if err := sm.DeleteSecret(id); err != nil {
+						return err
+					}
 				}
+				fmt.Printf("%s: %s\n", verb, id)
 			}
-			fmt.Printf("Deleted %d secrets\n", len(ids))
+			if dryRun {
+				fmt.Printf("Would delete %d secret(s)\n", len(ids))
+			} else {
+				fmt.Printf("Deleted %d secret(s)\n", len(ids))
+			}
 			return nil
 		},
 	}
@@ -397,21 +402,28 @@ func newReencryptCommand(sm *secrets.SecretManager) *cobra.Command {
 		Use:   "reencrypt [filters...]",
 		Short: "Re-encrypt secrets with the current per-folder recipients",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var targets []string
+			var err error
 			if dryRun {
-				targets, err := sm.ReencryptTargets(args...)
-				if err != nil {
-					return err
-				}
-				for _, id := range targets {
-					fmt.Println(id)
-				}
-				return nil
+				targets, err = sm.ReencryptTargets(args...)
+			} else {
+				targets, err = sm.ReencryptAll(args...)
 			}
-			targets, err := sm.ReencryptAll(args...)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Re-encrypted %d secrets\n", len(targets))
+			verb := "Re-encrypted"
+			if dryRun {
+				verb = "Would re-encrypt"
+			}
+			for _, id := range targets {
+				fmt.Printf("%s: %s\n", verb, id)
+			}
+			if dryRun {
+				fmt.Printf("Would re-encrypt %d secret(s)\n", len(targets))
+			} else {
+				fmt.Printf("Re-encrypted %d secret(s)\n", len(targets))
+			}
 			return nil
 		},
 	}
