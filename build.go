@@ -1,7 +1,11 @@
 package main
 
 import (
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -14,6 +18,7 @@ type Item struct {
 	Time        string
 	DisplayTime string
 	Size        int64
+	Hash        string
 }
 
 type BuildResult struct {
@@ -42,15 +47,43 @@ func getVersion() string {
 }
 
 func getItem(name string) Item {
-	fileInfo, err := os.Stat(binDir + "/" + name)
+	path := binDir + "/" + name
+	fileInfo, err := os.Stat(path)
 	if err != nil {
-		log.Fatalf("Error reading file: %s\n", binDir+"/"+name)
+		log.Fatalf("Error reading file: %s\n", path)
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("Error reading file: %s\n", path)
+	}
+	sum := sha256.Sum256(data)
 	return Item{
 		Name:        name,
 		Time:        fileInfo.ModTime().Format(time.RFC3339),
 		DisplayTime: fileInfo.ModTime().Format(time.RFC1123),
 		Size:        fileInfo.Size(),
+		Hash:        hex.EncodeToString(sum[:]),
+	}
+}
+
+func gzipFile(src, dst string) {
+	in, err := os.Open(src)
+	if err != nil {
+		log.Fatalf("Error opening file: %s\n", src)
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		log.Fatalf("Error creating file: %s\n", dst)
+	}
+	defer out.Close()
+	w, err := gzip.NewWriterLevel(out, gzip.BestCompression)
+	if err != nil {
+		log.Fatalf("Error creating gzip writer: %s\n", err)
+	}
+	defer w.Close()
+	if _, err := io.Copy(w, in); err != nil {
+		log.Fatalf("Error compressing file: %s\n", err)
 	}
 }
 
@@ -89,8 +122,16 @@ func build() BuildResult {
 			log.Fatalf("Failed building os=%s, arch=%s\n", buildOs, buildArch)
 		}
 		result.Items = append(result.Items, getItem(name))
+		gzName := name + ".gz"
+		gzipFile(binDir+"/"+name, binDir+"/"+gzName)
+		result.Items = append(result.Items, getItem(gzName))
 	}
-	os.WriteFile(binDir+"/version.txt", []byte(version), 0644)
+	var sb strings.Builder
+	sb.WriteString(version + "\n")
+	for _, item := range result.Items {
+		sb.WriteString(item.Name + " " + item.Hash + "\n")
+	}
+	os.WriteFile(binDir+"/version.txt", []byte(sb.String()), 0644)
 	log.Printf("Wrote version to %s/version.txt\n", binDir)
 	return result
 }

@@ -13,23 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+        uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: '^1.24.3'
+          go-version: '^1.27'
       - name: Build
         run: go run build.go
         env:
           BUILD_REPO: ${{ github.repository }}
-      - name: Create Latest Release
+      - name: Create Release
         run: |
-          VERSION=$(cat bin/version.txt)
-          if gh release view latest --repo ${{ github.repository }} &>/dev/null; then
-            gh release delete latest --yes --repo ${{ github.repository }}
+          VERSION=$(head -n 1 bin/version.txt)
+          TAG="v$(head -n 1 bin/version.txt | cut -d- -f1)"
+          if gh release view "$TAG" --repo ${{ github.repository }} &>/dev/null; then
+            gh release delete "$TAG" --yes --cleanup-tag --repo ${{ github.repository }}
           fi
-          gh release create latest --repo ${{ github.repository }} \
+          gh release create "$TAG" --repo ${{ github.repository }} \
             --title "pw $VERSION" \
-            --prerelease \
             bin/*
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

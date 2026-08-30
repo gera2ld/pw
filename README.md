@@ -21,6 +21,13 @@ curl -sL https://raw.githubusercontent.com/gera2ld/pw/main/install.sh | sh
 
 This installs `pw` to `~/.local/bin/pw`. Add that directory to your PATH.
 
+Or with [mise](https://mise.jdx.dev):
+
+```bash
+mise use -g github:gera2ld/pw           # latest
+mise use -g github:gera2ld/pw@26.8.30   # pinned to a release
+```
+
 <details>
 <summary>Manual install</summary>
 

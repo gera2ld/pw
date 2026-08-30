@@ -1,75 +1,84 @@
 #!/bin/sh
-
 set -e
 
-INSTALL_DIR="${HOME}/.local/bin"
-BIN_NAME="pw"
+# Project-specific values — edit these when reusing the script for another project.
 REPO="gera2ld/pw"
+BINARY="pw"
+DEST="$HOME/.local/bin/pw"
 
-mkdir -p "$INSTALL_DIR"
+# If GITHUB_TOKEN is set, use it for authenticated requests (private repo support).
+if [ -n "$GITHUB_TOKEN" ]; then
+  _curl() { curl -fSL -H "Authorization: Bearer $GITHUB_TOKEN" "$@"; }
+else
+  _curl() { curl -fSL "$@"; }
+fi
 
-detect_os() {
-    case "$(uname -s)" in
-        Darwin*) echo "darwin" ;;
-        Linux*) echo "linux" ;;
-        *) echo "linux" ;;
-    esac
-}
+# Detect the platform and architecture from the running system.
+OS="$(uname -s)"
+MARCH="$(uname -m)"
 
-detect_arch() {
-    case "$(uname -m)" in
-        x86_64|amd64) echo "amd64" ;;
-        arm64|aarch64) echo "arm64" ;;
-        *) echo "amd64" ;;
-    esac
-}
+case "$OS" in
+  Darwin) PLATFORM="darwin" ;;
+  Linux)  PLATFORM="linux" ;;
+  *) echo "unsupported OS: $OS" >&2; exit 1 ;;
+esac
 
-get_latest_version() {
-    curl -sL "https://github.com/${REPO}/releases/download/latest/version.txt"
-}
+case "$MARCH" in
+  arm64|aarch64) ARCH="arm64" ;;
+  x86_64|amd64)  ARCH="amd64" ;;
+  *) echo "unsupported arch: $MARCH" >&2; exit 1 ;;
+esac
 
-get_local_version() {
-    if [ -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
-        "${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null || echo ""
+# Download the asset.
+ASSET="${BINARY}-${PLATFORM}-${ARCH}"
+if command -v gzip >/dev/null 2>&1; then
+  CHOSEN="${ASSET}.gz"
+else
+  CHOSEN="${ASSET}"
+fi
+BASE_URL="https://github.com/${REPO}/releases/latest/download"
+TMP="/tmp/${CHOSEN}"
+
+mkdir -p "$(dirname "$DEST")"
+echo "Downloading ${CHOSEN} from ${REPO}…"
+_curl "${BASE_URL}/${CHOSEN}" -o "$TMP"
+
+# Verify the downloaded file's sha256 against version.txt when a hasher is available.
+if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+  if _curl "${BASE_URL}/version.txt" -o /tmp/pw-version.txt 2>/dev/null; then
+    EXPECTED="$(grep "^${CHOSEN} " /tmp/pw-version.txt | awk '{print $2}')"
+    if [ -n "$EXPECTED" ]; then
+      if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL="$(sha256sum "$TMP" | awk '{print $1}')"
+      else
+        ACTUAL="$(shasum -a 256 "$TMP" | awk '{print $1}')"
+      fi
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        echo "checksum mismatch: expected $EXPECTED, got $ACTUAL" >&2
+        rm -f "$TMP"
+        exit 1
+      fi
+      echo "Checksum verified."
     else
-        echo ""
+      echo "warning: no checksum for ${CHOSEN} in version.txt, skipping verification" >&2
     fi
-}
-
-OS=$(detect_os)
-ARCH=$(detect_arch)
-LATEST_VERSION=$(get_latest_version)
-LOCAL_VERSION=$(get_local_version)
-
-if [ "$LOCAL_VERSION" = "$LATEST_VERSION" ]; then
-    echo "pw ${LATEST_VERSION} is already installed"
-    exit 0
+  fi
 fi
 
-if [ -n "$LOCAL_VERSION" ]; then
-    echo "Updating pw: ${LOCAL_VERSION} -> ${LATEST_VERSION}"
-else
-    echo "Installing pw ${LATEST_VERSION}"
+# Decompress (if gzipped) and install the binary with executable permissions.
+if [ "$CHOSEN" != "$ASSET" ]; then
+  gzip -d "$TMP"
+  TMP="/tmp/${ASSET}"
+fi
+mv "$TMP" "$DEST"
+chmod +x "$DEST"
+
+# Remove the macOS quarantine attribute so the binary runs without a Gatekeeper warning.
+if [ "$PLATFORM" = "darwin" ]; then
+  xattr -d com.apple.quarantine "$DEST" 2>/dev/null || true
 fi
 
-URL="https://github.com/${REPO}/releases/download/latest/pw-${OS}-${ARCH}"
+# Report success and print the installed version.
+echo "Installed pw to $DEST"
+"$DEST" --version || true
 
-if [ "${OS}" = "windows" ]; then
-    URL="${URL}.exe"
-    DEST="${INSTALL_DIR}/${BIN_NAME}.exe"
-else
-    DEST="${INSTALL_DIR}/${BIN_NAME}"
-fi
-
-echo "Downloading ${URL}"
-curl -#L "$URL" -o "$DEST"
-chmod 755 "$DEST"
-
-echo "Installed to ${DEST}"
-
-if [ -d "${HOME}/.local/bin" ]; then
-    if ! echo "$PATH" | grep -q "${HOME}/.local/bin"; then
-        echo "Add to PATH (bash/zsh):"
-        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    fi
-fi
