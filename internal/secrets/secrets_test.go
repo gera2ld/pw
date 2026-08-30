@@ -267,3 +267,75 @@ func TestUniqueReadableUID(t *testing.T) {
 		t.Errorf("uniqueReadableUID() = %q, want %q", got, filepath.Join("db/prod", "password.3"))
 	}
 }
+
+func TestFuzzyFullIDMatches(t *testing.T) {
+	tests := []struct {
+		query  string
+		fullID string
+		want   bool
+	}{
+		{"a/b", "/a/b", true},
+		{"a/b", "/whatever/a/xxx/b", true},
+		{"a/b", "/x/a/c/b", true},
+		{"a/b/c", "/x/a/b/c", true},
+		{"a/b/c", "/x/b/a/c", false},
+		{"a/b", "/x/a/c", false},
+		{"b", "/x/a/b", true},
+		{"b", "/x/a/c", false},
+		{"x/y", "/x/y", true},
+		{"x/y", "/z/x/y", true},
+		{"x/y", "/y/z/x", false},
+		{"a/b", "/b/a", false},
+		{"a/b", "/b", false},
+		{"", "/a/b", false},
+	}
+	for _, tt := range tests {
+		if got := fuzzyFullIDMatches(tt.query, tt.fullID); got != tt.want {
+			t.Errorf("fuzzyFullIDMatches(%q, %q) = %v, want %v", tt.query, tt.fullID, got, tt.want)
+		}
+	}
+}
+
+func TestResolveKey(t *testing.T) {
+	index := &map[string]string{
+		"db/prod/password": "/db/prod/password",
+		"x/a/y/b":          "/x/a/y/b",
+		"db/z/b":           "/db/z/b",
+	}
+	d := &SecretManager{index: index}
+
+	// Exact match with leading "/".
+	got, err := d.ResolveKey("/db/prod/password")
+	if err != nil || got != "/db/prod/password" {
+		t.Errorf("ResolveKey(/db/prod/password) = %q, %v", got, err)
+	}
+
+	// Exact miss with leading "/" -> not found.
+	if _, err := d.ResolveKey("/db/prod/missing"); err == nil {
+		t.Error("ResolveKey(/db/prod/missing) expected error")
+	}
+
+	// Fuzzy single match.
+	got, err = d.ResolveKey("password")
+	if err != nil || got != "/db/prod/password" {
+		t.Errorf("ResolveKey(password) = %q, %v", got, err)
+	}
+
+	// Fuzzy subsequence single match.
+	got, err = d.ResolveKey("prod/password")
+	if err != nil || got != "/db/prod/password" {
+		t.Errorf("ResolveKey(prod/password) = %q, %v", got, err)
+	}
+
+	// Ambiguous: both /db/prod/password and /x/a/y/b match "b".
+	if _, err := d.ResolveKey("b"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("ResolveKey(b) expected ambiguous error, got %v", err)
+	}
+
+	// Ambiguous: "a/b" matches both /db/prod/password? No: basename must be b.
+	// /x/a/y/b matches (basename b, ancestor a), /db/prod/password does not.
+	got, err = d.ResolveKey("a/b")
+	if err != nil || got != "/x/a/y/b" {
+		t.Errorf("ResolveKey(a/b) = %q, %v", got, err)
+	}
+}

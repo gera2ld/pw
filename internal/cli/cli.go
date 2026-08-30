@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+
 	"pw/internal/secrets"
 	"pw/internal/update"
 	"slices"
@@ -15,6 +17,15 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+// resolveKey validates id and resolves it to a fullID. Any resolution failure
+// (not-found or ambiguous) is returned as an error.
+func resolveKey(sm *secrets.SecretManager, id string) (string, error) {
+	if !secrets.IsValidKey(id) {
+		return "", fmt.Errorf("invalid id %q: each part must be a valid name", id)
+	}
+	return sm.ResolveKey(id)
+}
 
 func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *cobra.Command {
 	cmd := &cobra.Command{
@@ -57,14 +68,20 @@ Use -- to separate IDs from the command.`,
 			}
 
 			ids := args[:dashIndex]
-			for _, id := range ids {
-				if !secrets.IsValidKey(id) {
-					return fmt.Errorf("invalid id %q: each part must be a valid name", id)
-				}
-			}
 			targetCmd := args[dashIndex:]
 
-			envVars := sm.GetSecrets(ids)
+			// Resolve ids to fullIDs; any resolution failure (not-found or
+			// ambiguous) aborts the command.
+			resolved := make([]string, 0, len(ids))
+			for _, id := range ids {
+				fullID, err := resolveKey(sm, id)
+				if err != nil {
+					return err
+				}
+				resolved = append(resolved, fullID)
+			}
+
+			envVars := sm.GetSecrets(resolved)
 
 			env := os.Environ()
 			for key, value := range envVars {
@@ -97,12 +114,11 @@ func newRmCommand(sm *secrets.SecretManager) *cobra.Command {
 		Short: "Delete the physical file and update index",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
-			if !secrets.IsValidKey(id) {
-				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+			fullID, err := resolveKey(sm, args[0])
+			if err != nil {
+				return err
 			}
-			err := sm.DeleteSecret(id)
-			return err
+			return sm.DeleteSecret(fullID)
 		},
 	}
 }
@@ -186,24 +202,35 @@ func newMvCommand(sm *secrets.SecretManager) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 			newID := args[1]
-			if !secrets.IsValidKey(id) {
-				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
-			}
 			if !secrets.IsValidKey(newID) {
 				return fmt.Errorf("invalid id %q: each part must be a valid name", newID)
 			}
-			parsed, err := sm.GetSecret(id)
+			sourceFullID, err := resolveKey(sm, id)
 			if err != nil {
 				return err
 			}
-			// __name is relative; store a path relative to the old id's directory
-			// so SetSecret can mirror it correctly.
-			rel, err := filepath.Rel(filepath.Dir(id), newID)
+
+			parsed, err := sm.GetSecret(sourceFullID)
 			if err != nil {
-				rel = filepath.Base(newID)
+				return err
 			}
+
+			// The target is explicit, never fuzzy-resolved: leading "/" is an
+			// absolute target, otherwise it is relative to the source's directory.
+			var targetFullID string
+			if strings.HasPrefix(newID, "/") {
+				targetFullID = filepath.Clean(newID)
+			} else {
+				targetFullID = filepath.Clean(filepath.Join(filepath.Dir(sourceFullID), newID))
+			}
+			rel, err := filepath.Rel(filepath.Dir(sourceFullID), targetFullID)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("cannot move %q to %q: target is outside its directory", sourceFullID, newID)
+			}
+			// __name is relative; store a path relative to the source's directory
+			// so SetSecret can mirror it correctly.
 			parsed.Data["__name"] = rel
-			return sm.SetSecret(id, parsed)
+			return sm.SetSecret(sourceFullID, parsed)
 		},
 	}
 }
@@ -224,20 +251,35 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				return errors.New("$EDITOR is not set")
 			}
 
-			parsed, err := sm.GetSecret(id)
+			// Absolute IDs are explicit targets — always allowed (create if new).
+			// Fuzzy IDs (no leading "/") must resolve to an existing secret.
+			isAbs := strings.HasPrefix(id, "/")
+			var sourceFullID string
+			if isAbs {
+				sourceFullID = secrets.CanonicalID(id)
+			} else {
+				var err error
+				sourceFullID, err = resolveKey(sm, id)
+				if err != nil {
+					return err
+				}
+			}
+
+			parsed, err := sm.GetSecret(sourceFullID)
 			var oldValue string
 			if err != nil {
-				fmt.Println("Editing new secret")
-				oldValue = fmt.Sprintf("__name: %s\n", filepath.Base(id))
-			} else {
-				if parsed.Data == nil {
-					parsed.Data = make(map[string]any)
+				if !isAbs {
+					return fmt.Errorf("failed to retrieve secret: %w", err)
 				}
-				value, err := sm.FormatValue(parsed)
+				// New secret
+				fmt.Println("Editing new secret")
+				parsed = &secrets.Secret{Data: map[string]any{"__name": filepath.Base(sourceFullID)}}
+				oldValue = fmt.Sprintf("__name: %s\n", filepath.Base(sourceFullID))
+			} else {
+				oldValue, err = sm.FormatValue(parsed)
 				if err != nil {
 					return fmt.Errorf("failed to format value: %w", err)
 				}
-				oldValue = value
 			}
 
 			nid, err := gonanoid.New()
@@ -277,7 +319,7 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 
 			parsed, err = sm.ParseRawValue(newValue)
 			if err != nil {
-				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __name: %s", err, id)
+				return fmt.Errorf("failed to parse new value: %w\nMake sure to include __name: %s", err, sourceFullID)
 			}
 
 			if err := sm.ValidateTemplates(parsed); err != nil {
@@ -286,26 +328,22 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 
 			rawName := parsed.Data["__name"].(string)
 			// __name is always relative (may contain "/" for sub-paths);
-			// it is mirrored to directories relative to dirname(id).
-			newID := filepath.Join(filepath.Dir(id), rawName)
-			if newID == "." {
-				newID = rawName
-			}
-			newID = filepath.Clean(newID)
+			// it is mirrored to directories relative to dirname(sourceFullID).
+			newID := filepath.Clean(filepath.Join(filepath.Dir(sourceFullID), rawName))
 
-			if newValue == oldValue && newID == id {
+			if newValue == oldValue && newID == sourceFullID {
 				fmt.Println("No changes made.")
 				return nil
 			}
 
-			if err := sm.SetSecret(id, parsed); err != nil {
+			if err := sm.SetSecret(sourceFullID, parsed); err != nil {
 				return fmt.Errorf("failed to save updated value: %w", err)
 			}
 
-			if newID != id {
-				fmt.Printf("Renamed %s to %s\n", id, newID)
+			if newID != sourceFullID {
+				fmt.Printf("Renamed %s to %s\n", sourceFullID, newID)
 			} else {
-				fmt.Println("Updated id:", id)
+				fmt.Println("Updated id:", sourceFullID)
 			}
 			return nil
 		},
@@ -371,12 +409,12 @@ func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 		Short: "Decrypt and print secret content",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
-			if !secrets.IsValidKey(id) {
-				return fmt.Errorf("invalid id %q: each part must be a valid name", id)
+			fullID, err := resolveKey(sm, args[0])
+			if err != nil {
+				return err
 			}
 
-			parsed, err := sm.GetSecret(id)
+			parsed, err := sm.GetSecret(fullID)
 			if err != nil {
 				return fmt.Errorf("failed to retrieve secret: %w", err)
 			}
@@ -430,14 +468,13 @@ func newEnvCommand(sm *secrets.SecretManager) *cobra.Command {
 		Short: "Print merged environment variables to stdout",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			for _, id := range args {
-				if !secrets.IsValidKey(id) {
-					return fmt.Errorf("invalid id %q: each part must be a valid name", id)
-				}
-			}
 			merged := make(map[string]string)
 			for _, id := range args {
-				vars, err := sm.ParseSecret(id)
+				fullID, err := resolveKey(sm, id)
+				if err != nil {
+					return err
+				}
+				vars, err := sm.ParseSecret(fullID)
 				if err != nil {
 					return fmt.Errorf("failed to parse secret %q: %w", id, err)
 				}

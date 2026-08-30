@@ -82,6 +82,14 @@ func IsValidKey(key string) bool {
 	if key == "" {
 		return false
 	}
+	// FullID is absolute ("/a/b"), but __name is relative ("a/b" or "c");
+	// accept both by trimming a single leading "/" before validating parts.
+	if strings.HasPrefix(key, "/") {
+		key = strings.TrimPrefix(key, "/")
+		if key == "" {
+			return false
+		}
+	}
 	for _, p := range strings.Split(key, "/") {
 		if !isValidNamePart(p) {
 			return false
@@ -91,6 +99,22 @@ func IsValidKey(key string) bool {
 }
 
 func isValidKey(key string) bool { return IsValidKey(key) }
+
+// CanonicalID ensures a fullID is absolute with leading "/" and cleaned.
+func CanonicalID(id string) string {
+	if id == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(id, "/") {
+		id = "/" + id
+	}
+	return filepath.Clean(id)
+}
+
+// relFromFullID returns the uid-relative path (no leading "/") for a fullID.
+func relFromFullID(fullID string) string {
+	return strings.TrimPrefix(fullID, "/")
+}
 
 // normalizeFilename sanitizes a secret name into a lowercase kebab-case file
 // base name: it lowercases, collapses non-alphanumeric runs to single hyphens,
@@ -359,9 +383,10 @@ func (d *SecretManager) BuildIndex() error {
 		fullID := d.fullIDFromUID(uid, rawName)
 		name := rawName
 		dir := filepath.Dir(fullID)
+		relDir := relFromFullID(dir)
 
 		var targetUID string
-		obscure := d.UserConfig.GetObscureNamesForPath(dir)
+		obscure := d.UserConfig.GetObscureNamesForPath(relDir)
 		if obscure {
 			// Keep nanoid-style filenames as-is; migrate readable ones to a nanoid.
 			if !isReadableFilename(uid, name) {
@@ -371,7 +396,7 @@ func (d *SecretManager) BuildIndex() error {
 			if err != nil {
 				return errors.New("failed to generate ID: " + err.Error())
 			}
-			targetUID = filepath.Join(dir, nid)
+			targetUID = relFromFullID(filepath.Join(dir, nid))
 			}
 		} else {
 			// Reuse an existing readable filename; otherwise assign a unique one.
@@ -379,9 +404,9 @@ func (d *SecretManager) BuildIndex() error {
 				targetUID = uid
 			} else {
 				base := normalizeFilename(filepath.Base(name))
-				targetUID = filepath.Join(dir, base)
+				targetUID = relFromFullID(filepath.Join(dir, base))
 				for i := 2; used[targetUID]; i++ {
-					targetUID = filepath.Join(dir, fmt.Sprintf("%s.%d", base, i))
+					targetUID = relFromFullID(filepath.Join(dir, fmt.Sprintf("%s.%d", base, i)))
 				}
 			}
 		}
@@ -404,7 +429,7 @@ func (d *SecretManager) BuildIndex() error {
 			// Rewrite content to ensure __name is relative and __id is removed.
 			data, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
 			if err == nil {
-				recipients := d.UserConfig.GetRecipientsForPath(filepath.Dir(fullID))
+				recipients := d.UserConfig.GetRecipientsForPath(relFromFullID(filepath.Dir(fullID)))
 				if enc, e := d.EncryptData(data, recipients); e == nil {
 					_ = d.Filehandler.WriteFile(d.GetSecretPath(targetUID), enc)
 				}
@@ -428,13 +453,68 @@ func (d *SecretManager) UpdateIndex(uid string, id string, idFrom string) error 
 }
 
 func (d *SecretManager) GetSecretUID(key string) (string, error) {
+	lookup := key
+	if strings.Contains(key, "/") {
+		lookup = CanonicalID(key)
+	}
 	index := d.LoadIndex()
 	for iUid, iId := range *index {
-		if iId == key {
+		if iId == lookup {
 			return iUid, nil
 		}
 	}
 	return "", fmt.Errorf("secret %q not found", key)
+}
+
+// fuzzyFullIDMatches reports whether query (relative, no leading "/") matches
+// fullID (absolute) under the fuzzy rule: basename (last part) must match
+// exactly, and each remaining query part must appear in order as a subsequence
+// of the target's ancestor parts.
+func fuzzyFullIDMatches(query string, fullID string) bool {
+	q := strings.Split(strings.Trim(query, "/"), "/")
+	t := strings.Split(strings.TrimPrefix(fullID, "/"), "/")
+	if len(q) == 0 || len(q) > len(t) {
+		return false
+	}
+	if q[len(q)-1] != t[len(t)-1] {
+		return false
+	}
+	qi := 0
+	for i := 0; i < len(t)-1 && qi < len(q)-1; i++ {
+		if t[i] == q[qi] {
+			qi++
+		}
+	}
+	return qi == len(q)-1
+}
+
+// ResolveKey resolves a key to a fullID. If key starts with "/" it must be an
+// exact match against an index value. Otherwise it is a fuzzy match (see
+// fuzzyFullIDMatches). Returns not-found error for 0 matches, or an ambiguous
+// error (containing the word "ambiguous") for multiple matches.
+func (d *SecretManager) ResolveKey(key string) (string, error) {
+	if strings.HasPrefix(key, "/") {
+		lookup := CanonicalID(key)
+		if _, err := d.GetSecretUID(lookup); err != nil {
+			return "", fmt.Errorf("secret %q not found", key)
+		}
+		return lookup, nil
+	}
+	index := d.LoadIndex()
+	var matches []string
+	for _, id := range *index {
+		if fuzzyFullIDMatches(key, id) {
+			matches = append(matches, id)
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("secret %q not found", key)
+	}
+	if len(matches) > 1 {
+		sort.Strings(matches)
+		return "", fmt.Errorf("ambiguous key %q matches %d keys: %s", key, len(matches), strings.Join(matches, ", "))
+	}
+	return matches[0], nil
 }
 
 func (d *SecretManager) GetOrCreateSecretUID(key string) (string, error) {
@@ -443,12 +523,12 @@ func (d *SecretManager) GetOrCreateSecretUID(key string) (string, error) {
 		return uid, nil
 	}
 
-	if d.UserConfig.GetObscureNamesForPath(filepath.Dir(key)) {
+	if d.UserConfig.GetObscureNamesForPath(relFromFullID(filepath.Dir(key))) {
 		nid, err := newNanoid()
 		if err != nil {
 			return "", errors.New("failed to generate ID: " + err.Error())
 		}
-		return filepath.Join(filepath.Dir(key), nid), nil
+		return relFromFullID(filepath.Join(filepath.Dir(key), nid)), nil
 	}
 
 	index := d.LoadIndex()
@@ -478,9 +558,9 @@ func (d *SecretManager) GetSecret(key string) (*Secret, error) {
 }
 
 // fullIDFromUID reconstructs the full id from a file's location (uid, relative
-// to the data dir) and the name stored inside it.
+// to the data dir) and the name stored inside it. FullIDs are always absolute.
 func (d *SecretManager) fullIDFromUID(uid string, name string) string {
-	return filepath.Join(filepath.Dir(uid), name)
+	return CanonicalID(filepath.Join(filepath.Dir(uid), name))
 }
 
 // rawNameOf returns the stored name of a secret from its __name field.
@@ -510,14 +590,15 @@ func isReadableFilename(uid string, name string) bool {
 	return false
 }
 
-// uniqueReadableUID returns a unique uid for a secret in readable mode, derived
-// from its name. It prefers a name with a ".N" suffix to avoid colliding with
-// uids already present in the index, excluding excludeUID (the file being
-// moved).
+// uniqueReadableUID returns a unique uid (no leading "/") for a secret in readable
+// mode, derived from its absolute fullID. It prefers a name with a ".N" suffix
+// to avoid colliding with uids already present in the index, excluding excludeUID.
 func (d *SecretManager) uniqueReadableUID(fullID string, index *map[string]string, excludeUID string) string {
 	dir := filepath.Dir(fullID)
 	base := normalizeFilename(filepath.Base(fullID))
 	candidate := filepath.Join(dir, base)
+	candidate = relFromFullID(candidate)
+	excludeUID = relFromFullID(excludeUID)
 	for i := 2; ; i++ {
 		if candidate != excludeUID {
 			if _, exists := (*index)[candidate]; !exists {
@@ -525,6 +606,7 @@ func (d *SecretManager) uniqueReadableUID(fullID string, index *map[string]strin
 			}
 		}
 		candidate = filepath.Join(dir, fmt.Sprintf("%s.%d", base, i))
+		candidate = relFromFullID(candidate)
 	}
 	return candidate
 }
@@ -544,9 +626,10 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 	if !isValidKey(oldID) {
 		return fmt.Errorf("invalid id %q: each part must be a valid name", oldID)
 	}
+	oldID = CanonicalID(oldID)
 	// __name is always the relative name (may contain "/" for sub-paths);
 	// it is mirrored to directories relative to the old id's directory.
-	fullID := filepath.Clean(filepath.Join(filepath.Dir(oldID), rawName))
+	fullID := CanonicalID(filepath.Join(filepath.Dir(oldID), rawName))
 	if !isValidKey(fullID) {
 		return fmt.Errorf("invalid id %q: each part must be a valid name", fullID)
 	}
@@ -567,13 +650,16 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 	}
 
 	// Place the file under dirname(fullID), keeping the nanoid in obscure mode
-	// or using a unique name-based filename otherwise.
+	// or using a unique name-based filename otherwise. UIDs are stored without leading "/".
 	var targetUID string
-	if d.UserConfig.GetObscureNamesForPath(filepath.Dir(fullID)) {
-		targetUID = filepath.Join(filepath.Dir(fullID), filepath.Base(uid))
+	if d.UserConfig.GetObscureNamesForPath(relFromFullID(filepath.Dir(fullID))) {
+		targetUID = relFromFullID(filepath.Join(filepath.Dir(fullID), filepath.Base(uid)))
 	} else if oldID == fullID {
 		// Updating an existing secret: keep its current uid.
-		targetUID = uid
+		targetUID = relFromFullID(uid)
+		if targetUID == "" {
+			targetUID = uid
+		}
 	} else {
 		// Renaming (or a new secret whose name collides): derive a unique uid,
 		// excluding the file currently being replaced.
@@ -587,7 +673,7 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 		return err
 	}
 
-	recipients := d.UserConfig.GetRecipientsForPath(filepath.Dir(fullID))
+	recipients := d.UserConfig.GetRecipientsForPath(relFromFullID(filepath.Dir(fullID)))
 	encrypted, err := d.EncryptData(data, recipients)
 	if err != nil {
 		return err
