@@ -42,8 +42,8 @@ func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *
 	cmd.AddCommand(newLsCommand(sm))
 	cmd.AddCommand(newMvCommand(sm))
 	cmd.AddCommand(newEditCommand(sm))
-	cmd.AddCommand(newRcpCommand(sm))
 	cmd.AddCommand(newReindexCommand(sm))
+	cmd.AddCommand(newReencryptCommand(sm))
 	cmd.AddCommand(newShowCommand(sm))
 	cmd.AddCommand(newEnvCommand(sm))
 	if update.Repo != "" {
@@ -350,45 +350,18 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 	}
 }
 
-func newRcpCommand(sm *secrets.SecretManager) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "rcp",
-		Short: "Manage age recipients (public keys)",
-	}
-
-	cmd.AddCommand(&cobra.Command{
-		Use:   "ls",
-		Short: "List all recipients",
+func newReencryptCommand(sm *secrets.SecretManager) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reencrypt",
+		Short: "Re-encrypt all secrets with the current per-folder recipients",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			recipients := sm.UserConfig.Data.Recipients
-			for _, recipient := range recipients {
-				fmt.Println(recipient)
+			if err := sm.ReencryptAll(); err != nil {
+				return err
 			}
+			fmt.Println("Re-encrypted all secrets")
 			return nil
 		},
-	})
-
-	cmd.AddCommand(&cobra.Command{
-		Use:   "add <recipient>",
-		Short: "Add a recipient",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			recipient := args[0]
-			return sm.UserConfig.AddRecipient(recipient)
-		},
-	})
-
-	cmd.AddCommand(&cobra.Command{
-		Use:   "rm <recipient>",
-		Short: "Remove a recipient",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			recipient := args[0]
-			return sm.UserConfig.RemoveRecipient(recipient)
-		},
-	})
-
-	return cmd
+	}
 }
 
 func newReindexCommand(sm *secrets.SecretManager) *cobra.Command {

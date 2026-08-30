@@ -2,9 +2,14 @@ package secrets
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"pw/internal/config"
+	"pw/internal/filehandler"
 )
 
 func TestParseRawValue(t *testing.T) {
@@ -337,5 +342,91 @@ func TestResolveKey(t *testing.T) {
 	got, err = d.ResolveKey("a/b")
 	if err != nil || got != "/x/a/y/b" {
 		t.Errorf("ResolveKey(a/b) = %q, %v", got, err)
+	}
+}
+
+func TestReencryptAll(t *testing.T) {
+	if _, err := exec.LookPath("age"); err != nil {
+		t.Skip("age not available; skipping reencrypt test")
+	}
+	if _, err := exec.LookPath("age-keygen"); err != nil {
+		t.Skip("age-keygen not available; skipping reencrypt test")
+	}
+
+	root := t.TempDir()
+	id1 := filepath.Join(root, "id1")
+	id2 := filepath.Join(root, "id2")
+
+	genKey := func(path string) string {
+		if out, err := exec.Command("age-keygen", "-o", path).CombinedOutput(); err != nil {
+			t.Fatalf("age-keygen: %v: %s", err, out)
+		}
+		out, err := exec.Command("age-keygen", "-y", path).Output()
+		if err != nil {
+			t.Fatalf("age-keygen -y: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	pub1 := genKey(id1)
+	pub2 := genKey(id2)
+
+	// Global recipients include id1; a per-folder config (db/) adds id2.
+	if err := os.WriteFile(filepath.Join(root, ".pw.yml"), []byte("recipients:\n  - "+pub1+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "vault", "db"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "vault", "db", ".pw.yml"), []byte("recipients:\n  - "+pub2+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.ConfigType{
+		RootDir:    root,
+		Identities: id1,
+		DataDir:    filepath.Join(root, "vault"),
+		EnvSuffix:  ".age",
+		IndexFile:  filepath.Join(root, "vault", "index.dat.age"),
+		ConfigFile: ".pw.yml",
+	}
+	fh := filehandler.NewFileHandler(root, false)
+	uc := config.NewUserConfig(cfg, fh)
+	sm := NewSecretManager(cfg, uc, fh)
+
+	val := &Secret{Data: map[string]any{"__name": "password", "TOKEN": "secret123"}}
+	if err := sm.SetSecret("/db/prod/password", val); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+
+	if err := sm.ReencryptAll(); err != nil {
+		t.Fatalf("ReencryptAll: %v", err)
+	}
+
+	// Content survives re-encryption under id1.
+	got, err := sm.GetSecret("/db/prod/password")
+	if err != nil {
+		t.Fatalf("GetSecret after reencrypt: %v", err)
+	}
+	if got.Data["TOKEN"] != "secret123" {
+		t.Fatalf("TOKEN = %v, want secret123", got.Data["TOKEN"])
+	}
+
+	// Per-folder recipients (id2) are honored during reencrypt: id2 can decrypt.
+	uid, err := sm.GetSecretUID("/db/prod/password")
+	if err != nil {
+		t.Fatalf("GetSecretUID: %v", err)
+	}
+	enc, err := fh.ReadFile(sm.GetSecretPath(uid))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	decCmd := exec.Command("age", "--decrypt", "-i", id2)
+	decCmd.Stdin = strings.NewReader(enc)
+	out, err := decCmd.Output()
+	if err != nil {
+		t.Fatalf("decrypt with id2: %v", err)
+	}
+	if !strings.Contains(string(out), "secret123") {
+		t.Fatalf("decrypted content missing secret: %s", out)
 	}
 }

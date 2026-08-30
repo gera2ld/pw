@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"log"
 	"path/filepath"
 	"pw/internal/filehandler"
@@ -47,14 +46,6 @@ func (c *UserConfigType) LoadUserConfig() error {
 	return yaml.Unmarshal([]byte(data), &c.Data)
 }
 
-func (c *UserConfigType) SaveUserConfig() error {
-	data, err := yaml.Marshal(c.Data)
-	if err != nil {
-		return err
-	}
-	return c.filehandler.WriteFile(c.config.ConfigFile, string(data))
-}
-
 type rawConfig struct {
 	Recipients   *[]string `yaml:"recipients"`
 	ObscureNames *bool     `yaml:"obscure_names"`
@@ -67,7 +58,7 @@ func (c *UserConfigType) mergedConfig(relDir string) UserConfigData {
 	var result UserConfigData
 	apply := func(raw rawConfig) {
 		if raw.Recipients != nil {
-			result.Recipients = *raw.Recipients
+			result.Recipients = append(result.Recipients, *raw.Recipients...)
 		}
 		if raw.ObscureNames != nil {
 			result.ObscureNames = *raw.ObscureNames
@@ -103,6 +94,18 @@ func (c *UserConfigType) mergedConfig(relDir string) UserConfigData {
 			}
 		}
 	}
+	// Dedupe recipients (union of all levels) while preserving first-seen order.
+	seen := make(map[string]struct{}, len(result.Recipients))
+	deduped := result.Recipients[:0]
+	for _, r := range result.Recipients {
+		if _, ok := seen[r]; ok {
+			continue
+		}
+		seen[r] = struct{}{}
+		deduped = append(deduped, r)
+	}
+	result.Recipients = deduped
+
 	c.cache[relDir] = result
 	return result
 }
@@ -113,26 +116,4 @@ func (c *UserConfigType) GetRecipientsForPath(relDir string) []string {
 
 func (c *UserConfigType) GetObscureNamesForPath(relDir string) bool {
 	return c.mergedConfig(relDir).ObscureNames
-}
-
-func (c *UserConfigType) AddRecipient(publicKey string) error {
-	for _, recipient := range c.Data.Recipients {
-		if recipient == publicKey {
-			return errors.New("recipient already exists")
-		}
-	}
-
-	c.Data.Recipients = append(c.Data.Recipients, publicKey)
-	return c.SaveUserConfig()
-}
-
-func (c *UserConfigType) RemoveRecipient(publicKey string) error {
-	newRecipients := []string{}
-	for _, recipient := range c.Data.Recipients {
-		if recipient != publicKey {
-			newRecipients = append(newRecipients, recipient)
-		}
-	}
-	c.Data.Recipients = newRecipients
-	return c.SaveUserConfig()
 }

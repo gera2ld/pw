@@ -44,8 +44,9 @@ mise use -g age
 # 1. Generate an age identity (private key)
 age-keygen -o ~/.config/pw/identities
 
-# 2. Initialize recipients (add your age public key from step 1)
-pw rcp add age1...
+# 2. Configure recipients: add your age public key to ~/.config/pw/.pw.yml
+#    recipients:
+#      - age1...
 
 # Create a secret
 pw edit my-api
@@ -103,7 +104,7 @@ reconstructed from the file's location + `__name`.
 | `mv` | `pw mv <id> <new_id>` | Rename a secret |
 | `rm` | `pw rm <id>` | Delete a secret |
 | `reindex` | `pw reindex` | Rebuild index |
-| `rcp` | `pw rcp <ls/add/rm>` | Manage age recipients |
+| `reencrypt` | `pw reencrypt` | Re-encrypt all secrets with the current per-folder recipients |
 | `import` | `pw import <dir>` | Import secrets (with `--conflict` option) |
 | `export` | `pw export` | Export to `vault-export/` |
 
@@ -118,11 +119,17 @@ Default locations (can be overridden with env vars):
 
 Recipients (age public keys) are configured in `.pw.yml` files. A `.pw.yml` at
 `$PW_ROOT` acts as the global default, and any `.pw.yml` inside the data directory
-overrides it for its folder and all subfolders (child replaces parent list).
+contributes recipients for its folder and all subfolders. Recipients are **unioned**
+across the global config, the vault root, and every ancestor folder, with duplicates
+removed (so a child folder can *add* recipients but not remove those inherited from
+a parent).
 
 ```bash
-# Add a recipient globally (writes to $PW_ROOT/.pw.yml)
-pw rcp add age1...
+# Configure recipients by editing .pw.yml (no CLI command needed)
+cat > $PW_ROOT/.pw.yml <<'EOF'
+recipients:
+  - age1...
+EOF
 ```
 
 You can also drop a `.pw.yml` next to your secrets to scope recipients per folder:
