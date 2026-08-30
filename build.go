@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -66,24 +67,44 @@ func getItem(name string) Item {
 	}
 }
 
-func gzipFile(src, dst string) {
+func tarGzFile(src, dst, name string) {
 	in, err := os.Open(src)
 	if err != nil {
 		log.Fatalf("Error opening file: %s\n", src)
 	}
 	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		log.Fatalf("Error reading file info: %s\n", src)
+	}
 	out, err := os.Create(dst)
 	if err != nil {
 		log.Fatalf("Error creating file: %s\n", dst)
 	}
-	defer out.Close()
-	w, err := gzip.NewWriterLevel(out, gzip.BestCompression)
+	gw, err := gzip.NewWriterLevel(out, gzip.BestCompression)
 	if err != nil {
 		log.Fatalf("Error creating gzip writer: %s\n", err)
 	}
-	defer w.Close()
-	if _, err := io.Copy(w, in); err != nil {
+	tw := tar.NewWriter(gw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Mode:     0o755,
+		Size:     info.Size(),
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		log.Fatalf("Error writing tar header: %s\n", err)
+	}
+	if _, err := io.Copy(tw, in); err != nil {
 		log.Fatalf("Error compressing file: %s\n", err)
+	}
+	if err := tw.Close(); err != nil {
+		log.Fatalf("Error closing tar: %s\n", err)
+	}
+	if err := gw.Close(); err != nil {
+		log.Fatalf("Error closing gzip: %s\n", err)
+	}
+	if err := out.Close(); err != nil {
+		log.Fatalf("Error closing file: %s\n", dst)
 	}
 }
 
@@ -121,10 +142,9 @@ func build() BuildResult {
 		if err != nil {
 			log.Fatalf("Failed building os=%s, arch=%s\n", buildOs, buildArch)
 		}
-		result.Items = append(result.Items, getItem(name))
-		gzName := name + ".gz"
-		gzipFile(binDir+"/"+name, binDir+"/"+gzName)
-		result.Items = append(result.Items, getItem(gzName))
+		tarGzFile(binDir+"/"+name, binDir+"/"+name+".tar.gz", name)
+		os.Remove(binDir + "/" + name)
+		result.Items = append(result.Items, getItem(name+".tar.gz"))
 	}
 	var sb strings.Builder
 	sb.WriteString(version + "\n")

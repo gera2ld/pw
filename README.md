@@ -31,8 +31,8 @@ mise use -g github:gera2ld/pw@26.8.30   # pinned to a release
 <details>
 <summary>Manual install</summary>
 
-1. Download the latest release from GitHub
-2. Make it executable: `chmod +x pw`
+1. Download the `.tar.gz` for your platform from the latest release on GitHub
+2. Extract it: `tar -xzf pw-<os>-<arch>.tar.gz`
 3. Move to your PATH: `mv pw ~/.local/bin/`
 
 </details>

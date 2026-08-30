@@ -29,13 +29,15 @@ case "$MARCH" in
   *) echo "unsupported arch: $MARCH" >&2; exit 1 ;;
 esac
 
+# The release ships .tar.gz archives only; tar and gzip are required to extract them.
+if ! command -v tar >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+  echo "error: tar and gzip are required to install pw" >&2
+  exit 1
+fi
+
 # Download the asset.
 ASSET="${BINARY}-${PLATFORM}-${ARCH}"
-if command -v gzip >/dev/null 2>&1; then
-  CHOSEN="${ASSET}.gz"
-else
-  CHOSEN="${ASSET}"
-fi
+CHOSEN="${ASSET}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/latest/download"
 TMP="/tmp/${CHOSEN}"
 
@@ -65,11 +67,10 @@ if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; th
   fi
 fi
 
-# Decompress (if gzipped) and install the binary with executable permissions.
-if [ "$CHOSEN" != "$ASSET" ]; then
-  gzip -d "$TMP"
-  TMP="/tmp/${ASSET}"
-fi
+# Extract the archive and install the binary with executable permissions.
+tar -xzf "$TMP" -C /tmp
+rm -f "$TMP"
+TMP="/tmp/${ASSET}"
 mv "$TMP" "$DEST"
 chmod +x "$DEST"
 
