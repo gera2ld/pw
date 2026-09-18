@@ -19,7 +19,7 @@ func main() {
 	sm := secrets.NewSecretManager(globalConfig, userConfig, filehandler)
 	rootCmd := cli.NewRootCommand(version, builtAt, sm)
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

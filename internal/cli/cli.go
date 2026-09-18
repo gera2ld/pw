@@ -31,9 +31,11 @@ func resolveKey(sm *secrets.SecretManager, id string) (string, error) {
 
 func NewRootCommand(version string, builtAt string, sm *secrets.SecretManager) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "pw",
-		Short:   "Minimalist CLI Secret Manager",
-		Version: version,
+		Use:           "pw",
+		Short:         "Minimalist CLI Secret Manager",
+		Version:       version,
+		SilenceErrors: true,
+		SilenceUsage:  true,
 	}
 	cmd.SetVersionTemplate("pw {{.Version}}\nbuilt at " + builtAt + "\n")
 
