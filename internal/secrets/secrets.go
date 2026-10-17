@@ -987,6 +987,11 @@ func (d *SecretManager) ReencryptAll(filters ...string) ([]string, error) {
 
 func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, error) {
 	fs := filehandler.NewFileHandler(outDir, d.Config.Debug)
+	if prefix == "" {
+		// An empty prefix means "everything"; normalize it so the paths below
+		// can be made relative to the vault root.
+		prefix = "/"
+	}
 	secrets := d.ListItems(prefix)
 	fmt.Println("Loaded", len(secrets), "files")
 	keys := make([]string, 0, len(secrets))

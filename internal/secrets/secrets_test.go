@@ -860,3 +860,62 @@ func TestIndexSurvivesReloadLegacyYAML(t *testing.T) {
 		t.Fatalf("index after delete = %v, want [/b]", keys)
 	}
 }
+
+func TestExportTreeDefaultPrefix(t *testing.T) {
+	if _, err := exec.LookPath("age"); err != nil {
+		t.Skip("age not available; skipping export test")
+	}
+	if _, err := exec.LookPath("age-keygen"); err != nil {
+		t.Skip("age-keygen not available; skipping export test")
+	}
+
+	root := t.TempDir()
+	id1 := filepath.Join(root, "id1")
+	if out, err := exec.Command("age-keygen", "-o", id1).CombinedOutput(); err != nil {
+		t.Fatalf("age-keygen: %v: %s", err, out)
+	}
+	out, err := exec.Command("age-keygen", "-y", id1).Output()
+	if err != nil {
+		t.Fatalf("age-keygen -y: %v", err)
+	}
+	pub1 := strings.TrimSpace(string(out))
+	if err := os.WriteFile(filepath.Join(root, ".pw.yml"), []byte("recipients:\n  - "+pub1+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.ConfigType{
+		RootDir:    root,
+		Identities: id1,
+		DataDir:    filepath.Join(root, "vault"),
+		EnvSuffix:  ".age",
+		IndexFile:  filepath.Join(root, "vault", "index.dat.age"),
+		ConfigFile: ".pw.yml",
+	}
+	fh := filehandler.NewFileHandler(root, false)
+	sm := NewSecretManager(cfg, config.NewUserConfig(cfg, fh), fh)
+	if err := sm.SetSecret("/demo", &Secret{Data: map[string]string{"__name": "demo", "K": "v"}}); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+	if err := sm.SetSecret("/sub/keep", &Secret{Data: map[string]string{"__name": "keep", "K": "w"}}); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+
+	// The default (empty) prefix must export everything under the vault root.
+	outDir := filepath.Join(root, "export")
+	keys, err := sm.ExportTree(outDir, "")
+	if err != nil {
+		t.Fatalf("ExportTree: %v", err)
+	}
+	if !reflect.DeepEqual(keys, []string{"/demo", "/sub/keep"}) {
+		t.Fatalf("keys = %v", keys)
+	}
+	for _, p := range []string{"demo", filepath.Join("sub", "keep")} {
+		content, err := os.ReadFile(filepath.Join(outDir, p))
+		if err != nil {
+			t.Fatalf("exported %s: %v", p, err)
+		}
+		if !strings.Contains(string(content), "K=") {
+			t.Errorf("exported %s missing data: %q", p, content)
+		}
+	}
+}
