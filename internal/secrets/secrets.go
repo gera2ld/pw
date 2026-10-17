@@ -36,9 +36,50 @@ func newNanoid() (string, error) {
 	return gonanoid.Generate(nanoidAlphabet, nanoidLen)
 }
 
+// Secret metadata keys. __name is the secret's relative name; __id is a legacy
+// field from earlier versions and is dropped on write.
+const (
+	keyName     = "__name"
+	keyLegacyID = "__id"
+)
+
+// Secret is a flat string map plus an optional raw payload. Raw holds the
+// secret's body exactly as the user wrote it (comments, quoting and key order
+// included) and is authoritative: Data is only a parsed view of it, used for
+// injection and lookups. An empty Raw means the body is generated from Data.
 type Secret struct {
-	Data    map[string]any
+	Raw     string
+	Data    map[string]string
 	Payload string
+	legacy  bool
+}
+
+// WithName returns a copy of the secret whose body declares __name=name and no
+// __id, preserving every other line verbatim. A programmatic secret without Raw
+// is regenerated from Data.
+func (s *Secret) WithName(name string) *Secret {
+	clone := &Secret{Payload: s.Payload, legacy: s.legacy}
+	clone.Data = make(map[string]string, len(s.Data))
+	for k, v := range s.Data {
+		clone.Data[k] = v
+	}
+	clone.Data[keyName] = name
+	delete(clone.Data, keyLegacyID)
+	if strings.TrimSpace(s.Raw) == "" {
+		clone.Raw = formatBody(clone.Data)
+	} else {
+		clone.Raw = patchName(s.Raw, name)
+	}
+	return clone
+}
+
+// Header returns the secret's body text: the original text when available,
+// otherwise a canonical rendering of Data.
+func (s *Secret) Header() string {
+	if strings.TrimSpace(s.Raw) != "" {
+		return s.Raw
+	}
+	return formatBody(s.Data)
 }
 
 type SecretManager struct {
@@ -138,29 +179,17 @@ func normalizeFilename(name string) string {
 }
 
 func (d *SecretManager) ParseRawValue(value string) (*Secret, error) {
-	lines := strings.Split(value, "\n")
+	body, payload := splitBody(value)
 
-	i := indexOf(lines, "---", 0)
-
-	var yamlContent string
-	if i >= 0 {
-		yamlContent = strings.Join(lines[:i], "\n")
-	} else {
-		yamlContent = value
+	data, legacy, err := parseBody(body)
+	if err != nil {
+		return nil, errors.New("invalid body: " + err.Error())
 	}
 
-	data := make(map[string]any)
-	if err := yaml.Unmarshal([]byte(yamlContent), &data); err != nil {
-		return nil, errors.New("invalid YAML: " + err.Error())
-	}
-
-	name, _ := data["__name"].(string)
+	name := data[keyName]
 	if name == "" {
 		// Fall back to __id when reindexing legacy files: use it as __name.
-		if id, _ := data["__id"].(string); id != "" {
-			name = id
-			data["__name"] = name
-		}
+		name = data[keyLegacyID]
 	}
 	if name == "" {
 		return nil, errors.New("invalid: missing or invalid '__name'")
@@ -168,22 +197,23 @@ func (d *SecretManager) ParseRawValue(value string) (*Secret, error) {
 	if !isValidKey(name) {
 		return nil, fmt.Errorf("invalid '__name' %q: each part must be a valid name", name)
 	}
+	data[keyName] = name
+	delete(data, keyLegacyID)
 
-	payload := ""
-	if i >= 0 && i < len(lines)-1 {
-		payload = strings.Join(lines[i+1:], "\n")
+	secret := &Secret{Data: data, Payload: payload, legacy: legacy}
+	if legacy {
+		// Legacy YAML is converted to canonical text so the next write
+		// upgrades the file; there is no original KEY=VALUE text to keep.
+		secret.Raw = formatBody(data)
+	} else {
+		secret.Raw = body
 	}
-
-	return &Secret{
-		Data:    data,
-		Payload: payload,
-	}, nil
+	return secret, nil
 }
 
 func (d *SecretManager) ValidateTemplates(secret *Secret) error {
 	for k, v := range secret.Data {
-		strVal := fmt.Sprintf("%v", v)
-		if _, err := template.New("").Option("missingkey=zero").Parse(strVal); err != nil {
+		if _, err := template.New("").Option("missingkey=zero").Parse(v); err != nil {
 			return fmt.Errorf("invalid template in field %q: %w", k, err)
 		}
 	}
@@ -204,31 +234,14 @@ func (d *SecretManager) FormatValue(value *Secret) (string, error) {
 		return "", errors.New("value is nil")
 	}
 
-	output := ""
-
-	data, err := yaml.Marshal(value.Data)
-	if err != nil {
-		return "", errors.New("failed to marshal data: " + err.Error())
-	}
-	output += string(data)
-
+	body := value.Header()
 	if value.Payload != "" {
-		output += "\n---\n" + value.Payload
+		if body != "" && !strings.HasSuffix(body, "\n") {
+			body += "\n"
+		}
+		return body + bodySeparator + "\n" + value.Payload, nil
 	}
-
-	return output, nil
-}
-
-// storedFileData returns a copy of the secret's data as it should be written to
-// disk: only the secret's name is stored (not the full id path).
-func storedFileData(data map[string]any, fullID string) map[string]any {
-	fileData := make(map[string]any, len(data))
-	for k, v := range data {
-		fileData[k] = v
-	}
-	delete(fileData, "__id")
-	fileData["__name"] = filepath.Base(fullID)
-	return fileData
+	return body, nil
 }
 
 func (d *SecretManager) EncryptData(data string, recipients []string) (string, error) {
@@ -339,26 +352,22 @@ func (d *SecretManager) LoadIndex() *map[string]string {
 	if err != nil {
 		return d.index
 	}
-	decrypted, err := d.DecryptData(data)
-	if err != nil {
+	if decrypted, err := d.DecryptData(data); err != nil {
 		if d.Config.Debug {
 			log.Printf("Error decrypting index: %v\n", err)
 		}
 		return d.index
-	}
-	if err := yaml.Unmarshal([]byte(decrypted), &index); err != nil {
+	} else if parsed, err := parseIndex(decrypted); err == nil {
+		*d.index = parsed
+	} else if err := yaml.Unmarshal([]byte(decrypted), d.index); err != nil {
 		return d.index
 	}
 	return d.index
 }
 
 func (d *SecretManager) SaveIndex(index *map[string]string) error {
-	indexContent, err := yaml.Marshal(index)
-	if err != nil {
-		return err
-	}
 	d.index = index
-	encrypted, err := d.EncryptData(string(indexContent), d.UserConfig.GetRecipientsForPath("."))
+	encrypted, err := d.EncryptData(formatIndex(*index), d.UserConfig.GetRecipientsForPath("."))
 	if err != nil {
 		return err
 	}
@@ -379,7 +388,7 @@ func (d *SecretManager) BuildIndex() error {
 	for _, uid := range uids {
 		value := secrets[uid]
 		rawName := rawNameOf(value.Data)
-		_, hasLegacyID := value.Data["__id"]
+		_, hasLegacyID := value.Data[keyLegacyID]
 		hasSlash := strings.Contains(rawName, "/")
 		fullID := d.fullIDFromUID(uid, rawName)
 		name := rawName
@@ -414,7 +423,7 @@ func (d *SecretManager) BuildIndex() error {
 
 		used[targetUID] = true
 
-		needsRewrite := hasLegacyID || hasSlash
+		needsRewrite := hasLegacyID || hasSlash || value.legacy
 		if targetUID != uid {
 			if err := d.Filehandler.MoveFile(d.GetSecretPath(uid), d.GetSecretPath(targetUID)); err != nil {
 				if d.Config.Debug {
@@ -427,8 +436,8 @@ func (d *SecretManager) BuildIndex() error {
 		}
 
 		if needsRewrite {
-			// Rewrite content to ensure __name is relative and __id is removed.
-			data, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
+			// Rewrite content so __name is relative and legacy fields are dropped.
+			data, err := d.FormatValue(value.WithName(filepath.Base(fullID)))
 			if err == nil {
 				recipients := d.UserConfig.GetRecipientsForPath(relFromFullID(filepath.Dir(fullID)))
 				if enc, e := d.EncryptData(data, recipients); e == nil {
@@ -602,11 +611,8 @@ func (d *SecretManager) fullIDFromUID(uid string, name string) string {
 }
 
 // rawNameOf returns the stored name of a secret from its __name field.
-func rawNameOf(data map[string]any) string {
-	if n, ok := data["__name"].(string); ok {
-		return n
-	}
-	return ""
+func rawNameOf(data map[string]string) string {
+	return data[keyName]
 }
 
 // isReadableFilename reports whether a secret's on-disk uid is already a
@@ -654,7 +660,7 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 		return errors.New("value is nil")
 	}
 
-	rawName, _ := value.Data["__name"].(string)
+	rawName := value.Data[keyName]
 	if rawName == "" {
 		return errors.New("invalid: missing or invalid '__name'")
 	}
@@ -705,8 +711,9 @@ func (d *SecretManager) SetSecret(oldID string, value *Secret) error {
 		targetUID = d.uniqueReadableUID(fullID, index, uid)
 	}
 
-	// Store only the name inside the file, not the full path.
-	data, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
+	// Store only the name inside the file, not the full path, without
+	// disturbing the rest of the user's text.
+	data, err := d.FormatValue(value.WithName(filepath.Base(fullID)))
 	if err != nil {
 		return err
 	}
@@ -764,14 +771,13 @@ func (d *SecretManager) ParseSecret(key string) (*Vars, error) {
 	result := Vars{Local: make(map[string]string), Env: make(map[string]string)}
 
 	for k, v := range parsed.Data {
-		strVal := fmt.Sprintf("%v", v)
 		if strings.HasPrefix(k, "__") {
 			continue
 		}
 		if strings.HasPrefix(k, "_") {
-			result.Local[k] = strVal
+			result.Local[k] = v
 		} else {
-			result.Env[k] = strVal
+			result.Env[k] = v
 		}
 	}
 
@@ -985,7 +991,7 @@ func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, erro
 	fmt.Println("Loaded", len(secrets), "files")
 	keys := make([]string, 0, len(secrets))
 	for uid, value := range secrets {
-		fullID := d.fullIDFromUID(uid, value.Data["__name"].(string))
+		fullID := d.fullIDFromUID(uid, value.Data[keyName])
 		keys = append(keys, fullID)
 		path, err := filepath.Rel(prefix, fullID)
 		path = strings.ReplaceAll(path, "\\", "/")
@@ -994,7 +1000,7 @@ func (d *SecretManager) ExportTree(outDir string, prefix string) ([]string, erro
 		}
 
 		// Export stores only the name; the path is implied by the file location.
-		output, err := d.FormatValue(&Secret{Data: storedFileData(value.Data, fullID), Payload: value.Payload})
+		output, err := d.FormatValue(value.WithName(filepath.Base(fullID)))
 		if err != nil {
 			return nil, fmt.Errorf("failed to format value: %w", err)
 		}
@@ -1024,15 +1030,17 @@ func (d *SecretManager) ImportTree(inDir string, prefix string, conflict string)
 
 		secret, err := d.ParseRawValue(value)
 		if err != nil {
-			secret = &Secret{
-				Data: map[string]any{"__name": filepath.Base(file)},
+			// The file is not a pw secret (no __name). Fall back to reading its
+			// body and derive the name from its path.
+			body, payload := splitBody(value)
+			data, legacy, perr := parseBody(body)
+			if perr != nil {
+				return nil, fmt.Errorf("failed to parse file: %w", perr)
 			}
-			if err := yaml.Unmarshal([]byte(value), &secret.Data); err != nil {
-				return nil, fmt.Errorf("failed to parse file: %w", err)
-			}
-			// Ensure __name stays relative (basename).
-			if n, ok := secret.Data["__name"].(string); ok {
-				secret.Data["__name"] = filepath.Base(n)
+			if legacy {
+				secret = &Secret{Data: data, Payload: payload}
+			} else {
+				secret = &Secret{Raw: body, Data: data, Payload: payload}
 			}
 		}
 

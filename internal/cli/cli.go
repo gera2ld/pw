@@ -15,7 +15,6 @@ import (
 
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 // resolveKey validates id and resolves it to a fullID. Any resolution failure
@@ -321,8 +320,8 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				}
 				// New secret
 				fmt.Println("Editing new secret")
-				parsed = &secrets.Secret{Data: map[string]any{"__name": filepath.Base(sourceFullID)}}
-				oldValue = fmt.Sprintf("__name: %s\n", filepath.Base(sourceFullID))
+				parsed = &secrets.Secret{Data: map[string]string{"__name": filepath.Base(sourceFullID)}}
+				oldValue = fmt.Sprintf("__name=%s\n", filepath.Base(sourceFullID))
 			} else {
 				oldValue, err = sm.FormatValue(parsed)
 				if err != nil {
@@ -374,7 +373,7 @@ func newEditCommand(sm *secrets.SecretManager) *cobra.Command {
 				return fmt.Errorf("failed to validate templates: %w", err)
 			}
 
-			rawName := parsed.Data["__name"].(string)
+			rawName := parsed.Data["__name"]
 			// __name is always relative (may contain "/" for sub-paths);
 			// it is mirrored to directories relative to dirname(sourceFullID).
 			newID := filepath.Clean(filepath.Join(filepath.Dir(sourceFullID), rawName))
@@ -463,7 +462,7 @@ func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 			}
 
 			if parsed.Data == nil {
-				parsed.Data = make(map[string]any)
+				parsed.Data = make(map[string]string)
 			}
 
 			if showJSON {
@@ -489,11 +488,11 @@ func newShowCommand(sm *secrets.SecretManager) *cobra.Command {
 				return nil
 			}
 
-			data, err := yaml.Marshal(parsed.Data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal data: %w", err)
+			header := parsed.Header()
+			if header != "" && !strings.HasSuffix(header, "\n") {
+				header += "\n"
 			}
-			fmt.Print(string(data))
+			fmt.Print(header)
 			return nil
 		},
 	}

@@ -57,12 +57,12 @@ age-keygen -o ~/.config/pw/identities
 
 # Create a secret
 pw edit my-api
-# Opens editor with default __name: my-api
+# Opens editor with default __name=my-api
 # Add your secrets:
-# __name: my-api
-# _base_url: https://api.example.com
-# API_KEY: secret123
-# ENDPOINT: '$_base_url/v1'
+# __name=my-api
+# _base_url=https://api.example.com
+# API_KEY=secret123
+# ENDPOINT=$_base_url/v1
 
 # Run command with secrets injected
 pw run my-api -- env
@@ -79,12 +79,13 @@ pw show my-api
 
 ## Data Schema
 
-Secrets are YAML files with optional raw payload:
+Each secret is a flat `KEY=VALUE` list with optional raw payload, separated by `---`:
 
-```yaml
-__name: password
-_key: local-only (not exported)
-SECRET_KEY: value
+```ini
+# comments are preserved as written
+__name=password
+_key=local-only (not exported)
+SECRET_KEY=value
 ---
 <Optional raw payload: SSH keys, certificates, etc.>
 ```
@@ -93,6 +94,23 @@ SECRET_KEY: value
 (`folder/subfolder/name`) determines where the file lives on disk — the directory is
 mirrored as plaintext folders and only the leaf `.age` file is encrypted. The full id is
 reconstructed from the file's location + `__name`.
+
+### Value syntax
+
+Every value is a string: nothing is coerced into a number, boolean or timestamp, so a
+value like `0xdeadbeef`, `2026-01-02` or `1e5` round-trips unchanged.
+
+- A line whose first non-whitespace character is `#` is a comment.
+- Split on the **first** `=`, so values may contain `=`, `:` and `#` freely.
+- **Bare** `KEY=value` — surrounding whitespace is trimmed.
+- **Double-quoted** `KEY="value"` — surrounding whitespace is trimmed and `\n`, `\t`,
+  `\r`, `\\`, `\"` are unescaped.
+- **Single-quoted** `KEY='value'` — surrounding whitespace is trimmed, taken literally.
+- Blank lines and duplicate keys: blank lines are ignored, duplicate keys are an error.
+
+The original text is stored verbatim, so `pw show` and `pw edit` never reflow your
+comments, quoting or key order. Legacy YAML secrets are still readable and are converted
+to this format on the next `pw reindex`/`pw reencrypt`/`pw edit`.
 
 ### Naming Conventions
 

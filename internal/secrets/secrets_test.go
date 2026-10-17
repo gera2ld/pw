@@ -20,31 +20,31 @@ func TestParseRawValue(t *testing.T) {
 		name        string
 		value       string
 		wantID      string
-		wantData    map[string]any
+		wantData    map[string]string
 		wantPayload string
 		wantErr     bool
 	}{
 		{
 			name:        "basic with data",
-			value:       "__name: github-token\nTOKEN: ghp_abc123\n",
+			value:       "__name=github-token\nTOKEN=ghp_abc123\n",
 			wantID:      "github-token",
-			wantData:    map[string]any{"TOKEN": "ghp_abc123"},
+			wantData:    map[string]string{"TOKEN": "ghp_abc123"},
 			wantPayload: "",
 			wantErr:     false,
 		},
 		{
 			name:        "with data and payload",
-			value:       "__name: ssh-key\nKEY: value\n---\n-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n",
+			value:       "__name=ssh-key\nKEY=value\n---\n-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n",
 			wantID:      "ssh-key",
-			wantData:    map[string]any{"KEY": "value"},
+			wantData:    map[string]string{"KEY": "value"},
 			wantPayload: "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n",
 			wantErr:     false,
 		},
 		{
 			name:   "with local and export vars",
-			value:  "__name: my-api\n_base_url: https://api.example.com\nAPI_KEY: secret123\nENDPOINT: $_base_url/v1\n",
+			value:  "__name=my-api\n_base_url=https://api.example.com\nAPI_KEY=secret123\nENDPOINT=$_base_url/v1\n",
 			wantID: "my-api",
-			wantData: map[string]any{
+			wantData: map[string]string{
 				"_base_url": "https://api.example.com",
 				"API_KEY":   "secret123",
 				"ENDPOINT":  "$_base_url/v1",
@@ -53,23 +53,49 @@ func TestParseRawValue(t *testing.T) {
 			wantErr:     false,
 		},
 		{
+			name:        "quoted values",
+			value:       "__name=q\nA=\"x y\"\nB='x y'\nC=\"a\\nb\"\nD=\" spaced \"\n",
+			wantID:      "q",
+			wantData:    map[string]string{"A": "x y", "B": "x y", "C": "a\nb", "D": " spaced "},
+			wantPayload: "",
+			wantErr:     false,
+		},
+		{
+			// The whole point of dropping YAML: these stay strings.
+			name:        "numeric-looking values stay strings",
+			value:       "__name=h\nHEX=0xdeadbeef\nDATE=2026-01-02\nBIG=12345678901234567890\nE=1e5\n",
+			wantID:      "h",
+			wantData:    map[string]string{"HEX": "0xdeadbeef", "DATE": "2026-01-02", "BIG": "12345678901234567890", "E": "1e5"},
+			wantPayload: "",
+			wantErr:     false,
+		},
+		{
 			name:    "missing __name",
-			value:   "FOO: bar\nBAZ: qux\n",
+			value:   "FOO=bar\nBAZ=qux\n",
 			wantErr: true,
 		},
 		{
 			name:        "just __name with payload",
-			value:       "__name: test\n---\nraw payload data\n",
+			value:       "__name=test\n---\nraw payload data\n",
 			wantID:      "test",
-			wantData:    map[string]any{},
+			wantData:    map[string]string{},
 			wantPayload: "raw payload data\n",
 			wantErr:     false,
 		},
 		{
 			name:        "empty data with payload",
-			value:       "__name: test\n---\n",
+			value:       "__name=test\n---\n",
 			wantID:      "test",
-			wantData:    map[string]any{},
+			wantData:    map[string]string{},
+			wantPayload: "",
+			wantErr:     false,
+		},
+		{
+			// Legacy YAML is still readable and is converted on parse.
+			name:        "legacy yaml",
+			value:       "__name: legacy\n_base_url: \"https://x.io\"\nENDPOINT: '{{._base_url}}/v1'\n",
+			wantID:      "legacy",
+			wantData:    map[string]string{"_base_url": "https://x.io", "ENDPOINT": "{{._base_url}}/v1"},
 			wantPayload: "",
 			wantErr:     false,
 		},
@@ -85,7 +111,7 @@ func TestParseRawValue(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if got.Data["__name"].(string) != tt.wantID {
+			if got.Data["__name"] != tt.wantID {
 				t.Errorf("Data[__name] = %v, want %v", got.Data["__name"], tt.wantID)
 			}
 			for k, v := range tt.wantData {
@@ -113,25 +139,32 @@ func TestFormatValue(t *testing.T) {
 		{
 			name: "basic with data",
 			value: &Secret{
-				Data:    map[string]any{"__name": "github-token", "TOKEN": "ghp_abc123"},
+				Data:    map[string]string{"__name": "github-token", "TOKEN": "ghp_abc123"},
 				Payload: "",
 			},
-			wantContains: []string{"__name: github-token", "TOKEN: ghp_abc123"},
+			wantContains: []string{"__name=github-token", "TOKEN=ghp_abc123"},
 		},
 		{
 			name: "with payload",
 			value: &Secret{
-				Data:    map[string]any{"__name": "ssh-key", "KEY": "value"},
+				Data:    map[string]string{"__name": "ssh-key", "KEY": "value"},
 				Payload: "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
 			},
-			wantContains: []string{"__name: ssh-key", "KEY: value", "-----BEGIN OPENSSH PRIVATE KEY-----"},
+			wantContains: []string{"__name=ssh-key\n", "KEY=value\n", "---\n", "-----BEGIN OPENSSH PRIVATE KEY-----"},
 		},
 		{
 			name: "just data",
 			value: &Secret{
-				Data: map[string]any{"__name": "test", "FOO": "bar"},
+				Data: map[string]string{"__name": "test", "FOO": "bar"},
 			},
-			wantContains: []string{"FOO: bar"},
+			wantContains: []string{"FOO=bar"},
+		},
+		{
+			name: "values needing quotes",
+			value: &Secret{
+				Data: map[string]string{"__name": "test", "SPACED": " x ", "MULTI": "a\nb", "QUOTED": `"q"`},
+			},
+			wantContains: []string{`SPACED=" x "`, `MULTI="a\nb"`, `QUOTED="\"q\""`},
 		},
 	}
 
@@ -154,7 +187,7 @@ func TestFormatValue(t *testing.T) {
 func TestParseSecret(t *testing.T) {
 	d := &SecretManager{}
 
-	parsed, err := d.ParseRawValue("__name: my-api\n_base_url: \"https://api.example.com\"\nAPI_KEY: secret123\nENDPOINT: '{{._base_url}}/v1'\n_PASSWORD: p@ss$word!\n")
+	parsed, err := d.ParseRawValue("__name=my-api\n_base_url=https://api.example.com\nAPI_KEY=secret123\nENDPOINT={{._base_url}}/v1\n_PASSWORD=p@ss$word!\n")
 	if err != nil {
 		t.Fatalf("ParseRawValue() error = %v", err)
 	}
@@ -220,8 +253,8 @@ func TestResolveVariables(t *testing.T) {
 func TestValidateTemplates(t *testing.T) {
 	d := &SecretManager{}
 
-	valid := "__name: test\nURL: '{{._base}}/api'\n"
-	invalid := "__name: test\nURL: '{{._base'\n"
+	valid := "__name=test\nURL={{._base}}/api\n"
+	invalid := "__name=test\nURL={{._base\n"
 
 	secret, err := d.ParseRawValue(valid)
 	if err != nil {
@@ -417,7 +450,7 @@ func TestReencryptAll(t *testing.T) {
 	uc := config.NewUserConfig(cfg, fh)
 	sm := NewSecretManager(cfg, uc, fh)
 
-	val := &Secret{Data: map[string]any{"__name": "password", "TOKEN": "secret123"}}
+	val := &Secret{Data: map[string]string{"__name": "password", "TOKEN": "secret123"}}
 	if err := sm.SetSecret("/db/prod/password", val); err != nil {
 		t.Fatalf("SetSecret: %v", err)
 	}
@@ -637,8 +670,8 @@ func TestReencryptAllFiltered(t *testing.T) {
 	uc := config.NewUserConfig(cfg, fh)
 	sm := NewSecretManager(cfg, uc, fh)
 
-	dbVal := &Secret{Data: map[string]any{"__name": "password", "TOKEN": "dbpass"}}
-	otherVal := &Secret{Data: map[string]any{"__name": "password", "TOKEN": "otherpass"}}
+	dbVal := &Secret{Data: map[string]string{"__name": "password", "TOKEN": "dbpass"}}
+	otherVal := &Secret{Data: map[string]string{"__name": "password", "TOKEN": "otherpass"}}
 	if err := sm.SetSecret("/db/prod/password", dbVal); err != nil {
 		t.Fatalf("SetSecret db: %v", err)
 	}
@@ -705,5 +738,125 @@ func TestReencryptAllFiltered(t *testing.T) {
 	}
 	if canDecrypt(otherUID) {
 		t.Fatal("non-matched secret must remain undecryptable by id2")
+	}
+}
+
+func TestIndexSurvivesReload(t *testing.T) {
+	if _, err := exec.LookPath("age"); err != nil {
+		t.Skip("age not available; skipping index reload test")
+	}
+	if _, err := exec.LookPath("age-keygen"); err != nil {
+		t.Skip("age-keygen not available; skipping index reload test")
+	}
+
+	root := t.TempDir()
+	id1 := filepath.Join(root, "id1")
+	if out, err := exec.Command("age-keygen", "-o", id1).CombinedOutput(); err != nil {
+		t.Fatalf("age-keygen: %v: %s", err, out)
+	}
+	out, err := exec.Command("age-keygen", "-y", id1).Output()
+	if err != nil {
+		t.Fatalf("age-keygen -y: %v", err)
+	}
+	pub1 := strings.TrimSpace(string(out))
+	if err := os.WriteFile(filepath.Join(root, ".pw.yml"), []byte("recipients:\n  - "+pub1+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.ConfigType{
+		RootDir:    root,
+		Identities: id1,
+		DataDir:    filepath.Join(root, "vault"),
+		EnvSuffix:  ".age",
+		IndexFile:  filepath.Join(root, "vault", "index.dat.age"),
+		ConfigFile: ".pw.yml",
+	}
+	newSM := func() *SecretManager {
+		fh := filehandler.NewFileHandler(root, false)
+		return NewSecretManager(cfg, config.NewUserConfig(cfg, fh), fh)
+	}
+
+	sm := newSM()
+	for _, id := range []string{"/a", "/b"} {
+		name := strings.TrimPrefix(id, "/")
+		if err := sm.SetSecret(id, &Secret{Data: map[string]string{"__name": name, "K": name}}); err != nil {
+			t.Fatalf("SetSecret(%s): %v", id, err)
+		}
+	}
+
+	// A fresh process reads the new-format index; mutating it must not drop the
+	// other entries (LoadIndex and the cached index must stay the same map).
+	sm2 := newSM()
+	if err := sm2.DeleteSecret("/a"); err != nil {
+		t.Fatalf("DeleteSecret: %v", err)
+	}
+	keys, err := sm2.ListSecrets()
+	if err != nil {
+		t.Fatalf("ListSecrets: %v", err)
+	}
+	if !reflect.DeepEqual(keys, []string{"/b"}) {
+		t.Fatalf("index after delete = %v, want [/b]", keys)
+	}
+}
+
+func TestIndexSurvivesReloadLegacyYAML(t *testing.T) {
+	if _, err := exec.LookPath("age"); err != nil {
+		t.Skip("age not available; skipping legacy index reload test")
+	}
+	if _, err := exec.LookPath("age-keygen"); err != nil {
+		t.Skip("age-keygen not available; skipping legacy index reload test")
+	}
+
+	root := t.TempDir()
+	id1 := filepath.Join(root, "id1")
+	if out, err := exec.Command("age-keygen", "-o", id1).CombinedOutput(); err != nil {
+		t.Fatalf("age-keygen: %v: %s", err, out)
+	}
+	out, err := exec.Command("age-keygen", "-y", id1).Output()
+	if err != nil {
+		t.Fatalf("age-keygen -y: %v", err)
+	}
+	pub1 := strings.TrimSpace(string(out))
+	if err := os.WriteFile(filepath.Join(root, ".pw.yml"), []byte("recipients:\n  - "+pub1+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.ConfigType{
+		RootDir:    root,
+		Identities: id1,
+		DataDir:    filepath.Join(root, "vault"),
+		EnvSuffix:  ".age",
+		IndexFile:  filepath.Join(root, "vault", "index.dat.age"),
+		ConfigFile: ".pw.yml",
+	}
+	fh := filehandler.NewFileHandler(root, false)
+	sm := NewSecretManager(cfg, config.NewUserConfig(cfg, fh), fh)
+	if err := sm.SetSecret("/a/x", &Secret{Data: map[string]string{"__name": "x", "K": "1"}}); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+	if err := sm.SetSecret("/b", &Secret{Data: map[string]string{"__name": "b", "K": "2"}}); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+
+	// Rewrite the index in the legacy YAML layout, then confirm a fresh process
+	// still reads it and preserves the other entry when it writes.
+	enc, err := sm.EncryptData("a/x: /a/x\nb: /b\n", sm.UserConfig.GetRecipientsForPath("."))
+	if err != nil {
+		t.Fatalf("EncryptData: %v", err)
+	}
+	if err := fh.WriteFile(cfg.IndexFile, enc); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	sm2 := NewSecretManager(cfg, config.NewUserConfig(cfg, fh), fh)
+	if err := sm2.DeleteSecret("/a/x"); err != nil {
+		t.Fatalf("DeleteSecret: %v", err)
+	}
+	keys, err := sm2.ListSecrets()
+	if err != nil {
+		t.Fatalf("ListSecrets: %v", err)
+	}
+	if !reflect.DeepEqual(keys, []string{"/b"}) {
+		t.Fatalf("index after delete = %v, want [/b]", keys)
 	}
 }
