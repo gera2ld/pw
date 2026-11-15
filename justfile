@@ -1,10 +1,9 @@
-set positional-arguments
-
 default:
-  just --list
+    just --list
 
 build:
-  go run build.go
+    go run build.go
 
+[positional-arguments]
 run *args:
-  go run ./cmd/pw "$@"
+    go run ./cmd/pw "$@"
